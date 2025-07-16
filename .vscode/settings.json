@@ -1,0 +1,6 @@
+{
+  "python.testing.pytestArgs": ["obd"],
+  "python.testing.unittestEnabled": false,
+  "python.testing.pytestEnabled": true,
+  "zencoder.enableRepoIndexing": true
+}

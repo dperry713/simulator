@@ -1,0 +1,74 @@
+{
+  "appearance": {
+    "mode": "dark",
+    "theme": "blue"
+  },
+  "connection": {
+    "default_baudrate": 38400,
+    "timeout": 30,
+    "auto_connect": false,
+    "preferred_port": ""
+  },
+  "monitoring": {
+    "update_interval": 0.5,
+    "max_log_entries": 1000,
+    "auto_save_logs": true,
+    "log_directory": "logs"
+  },
+  "alerts": {
+    "enable_audio": true,
+    "enable_visual": true,
+    "dtc_alerts": true,
+    "threshold_alerts": true
+  },
+  "window": {
+    "geometry": "1200x800",
+    "state": "normal"
+  },
+  "dashboard": {
+    "gauges": {
+      "rpm": {
+        "min": 0,
+        "max": 8000,
+        "unit": "RPM",
+        "warning_threshold": 6000,
+        "critical_threshold": 7000
+      },
+      "speed": {
+        "min": 0,
+        "max": 200,
+        "unit": "km/h",
+        "warning_threshold": 120,
+        "critical_threshold": 160
+      },
+      "engine_load": {
+        "min": 0,
+        "max": 100,
+        "unit": "%",
+        "warning_threshold": 80,
+        "critical_threshold": 95
+      },
+      "coolant_temp": {
+        "min": -40,
+        "max": 120,
+        "unit": "\u00c2\u00b0C",
+        "warning_threshold": 90,
+        "critical_threshold": 105
+      },
+      "intake_temp": {
+        "min": -40,
+        "max": 120,
+        "unit": "\u00c2\u00b0C",
+        "warning_threshold": 60,
+        "critical_threshold": 80
+      },
+      "throttle_pos": {
+        "min": 0,
+        "max": 100,
+        "unit": "%",
+        "warning_threshold": 90,
+        "critical_threshold": 100
+      }
+    }
+  }
+}
