@@ -310,13 +310,88 @@ class PlotlyChartManager:
     
     def save_chart_html(self, fig, chart_id):
         """Save chart as HTML file and return path"""
-        html_content = self.generate_chart_html(fig, chart_id)
-        html_path = os.path.join(self.temp_dir, f'{chart_id}.html')
-        
-        with open(html_path, 'w', encoding='utf-8') as f:
-            f.write(html_content)
-        
-        return html_path
+        try:
+            html_content = self.generate_chart_html(fig, chart_id)
+            html_path = os.path.join(self.temp_dir, f'{chart_id}.html')
+            
+            # Ensure temp directory exists
+            os.makedirs(self.temp_dir, exist_ok=True)
+            
+            with open(html_path, 'w', encoding='utf-8') as f:
+                f.write(html_content)
+            
+            return html_path
+            
+        except Exception as e:
+            logger.error(f"Error saving chart HTML: {str(e)}")
+            # Return path to error HTML
+            return self.create_error_html(str(e))
+    
+    def create_error_html(self, error_message):
+        """Create an error HTML file"""
+        try:
+            colors = self.get_theme_colors()
+            error_html = f"""
+            <!DOCTYPE html>
+            <html>
+            <head>
+                <title>Chart Error</title>
+                <style>
+                    body {{
+                        background-color: {colors['background']};
+                        color: {colors['text']};
+                        font-family: {colors['font_family']};
+                        text-align: center;
+                        padding: 50px;
+                        margin: 0;
+                    }}
+                    .error-container {{
+                        max-width: 600px;
+                        margin: 0 auto;
+                        padding: 30px;
+                        border: 2px solid #ff4444;
+                        border-radius: 10px;
+                        background-color: rgba(255, 68, 68, 0.1);
+                    }}
+                    h2 {{
+                        color: #ff4444;
+                        margin-bottom: 20px;
+                    }}
+                    p {{
+                        line-height: 1.6;
+                        margin-bottom: 15px;
+                    }}
+                    .error-message {{
+                        font-family: monospace;
+                        background-color: rgba(0, 0, 0, 0.3);
+                        padding: 10px;
+                        border-radius: 5px;
+                        margin: 20px 0;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class="error-container">
+                    <h2>Chart Error</h2>
+                    <p>An error occurred while creating the chart:</p>
+                    <div class="error-message">{error_message}</div>
+                    <p>Please check the application logs for more details.</p>
+                </div>
+            </body>
+            </html>
+            """
+            
+            error_path = os.path.join(self.temp_dir, 'error.html')
+            os.makedirs(self.temp_dir, exist_ok=True)
+            
+            with open(error_path, 'w', encoding='utf-8') as f:
+                f.write(error_html)
+            
+            return error_path
+            
+        except Exception as e:
+            logger.error(f"Error creating error HTML: {str(e)}")
+            return None
     
     def set_theme(self, theme):
         """Update theme for all charts"""
@@ -881,27 +956,91 @@ class EnhancedOBDMonitor:
         """Setup the Plotly chart widget using tkinterweb"""
         try:
             # Create tkinterweb HTML widget for Plotly charts
-            self.plotly_widget = tkinterweb.HtmlFrame(self.plotly_chart_tab, messages_enabled=False)
+            self.plotly_widget = tkinterweb.HtmlFrame(
+                self.plotly_chart_tab, 
+                messages_enabled=False,
+                vertical_scrollbar=False,
+                horizontal_scrollbar=False
+            )
             self.plotly_widget.pack(fill="both", expand=True, padx=5, pady=5)
             
             # Load initial empty chart
             self.load_initial_plotly_chart()
             
+            logger.info("Plotly chart widget initialized successfully")
+            
+        except ImportError as e:
+            logger.error(f"tkinterweb not available: {str(e)}")
+            # Fallback to instruction label
+            error_frame = ctk.CTkFrame(self.plotly_chart_tab)
+            error_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            error_label = ctk.CTkLabel(
+                error_frame, 
+                text="Plotly Charts Unavailable\n\nRequired dependencies:\n- tkinterweb\n- plotly\n\nInstall with: pip install tkinterweb plotly",
+                font=ctk.CTkFont(size=14),
+                text_color="orange"
+            )
+            error_label.pack(expand=True)
+            
         except Exception as e:
             logger.error(f"Error setting up Plotly widget: {str(e)}")
-            # Fallback to label if tkinterweb fails
-            error_label = ctk.CTkLabel(self.plotly_chart_tab, 
-                                     text=f"Error loading Plotly widget: {str(e)}\nPlease check tkinterweb installation.")
+            # Fallback to error label
+            error_frame = ctk.CTkFrame(self.plotly_chart_tab)
+            error_frame.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            error_label = ctk.CTkLabel(
+                error_frame, 
+                text=f"Error loading Plotly widget:\n{str(e)}\n\nCheck the logs for more details.",
+                font=ctk.CTkFont(size=14),
+                text_color="red"
+            )
             error_label.pack(expand=True)
     
     def load_initial_plotly_chart(self):
         """Load an initial empty Plotly chart"""
         try:
-            initial_fig = self.plotly_manager.create_real_time_chart("Select PIDs and Start Monitoring")
+            if not hasattr(self, 'plotly_widget'):
+                return
+                
+            initial_fig = self.plotly_manager.create_real_time_chart(
+                "Interactive Charts Ready - Select PIDs and Start Monitoring"
+            )
+            
+            # Add a placeholder trace
+            initial_fig.add_annotation(
+                x=0.5, y=0.5,
+                text="Select PIDs from the list and click 'Start Plotly Chart'<br>to begin real-time monitoring",
+                showarrow=False,
+                font=dict(size=16, color=self.plotly_manager.get_theme_colors()['text']),
+                align="center",
+                xref="paper", yref="paper"
+            )
+            
             html_path = self.plotly_manager.save_chart_html(initial_fig, "main_chart")
             self.plotly_widget.load_file(html_path)
+            
+            logger.info("Initial Plotly chart loaded")
+            
         except Exception as e:
             logger.error(f"Error loading initial Plotly chart: {str(e)}")
+            # Try to show error in widget if possible
+            if hasattr(self, 'plotly_widget'):
+                try:
+                    error_html = f"""
+                    <html>
+                    <body style="background-color: #2b2b2b; color: white; font-family: Arial; text-align: center; padding: 50px;">
+                        <h2>Chart Loading Error</h2>
+                        <p>Error: {str(e)}</p>
+                        <p>Please check the logs for more details.</p>
+                    </body>
+                    </html>
+                    """
+                    with open(os.path.join(self.plotly_manager.temp_dir, 'error.html'), 'w') as f:
+                        f.write(error_html)
+                    self.plotly_widget.load_file(os.path.join(self.plotly_manager.temp_dir, 'error.html'))
+                except:
+                    pass
     
     def start_plotly_charting(self):
         """Start real-time Plotly charting for selected PIDs"""
