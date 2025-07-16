@@ -15,6 +15,12 @@ import numpy as np
 from typing import Dict, List, Optional
 import logging
 import os
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+import tkinterweb
+import tempfile
+import webbrowser
 
 # For Windows audio alerts
 try:
@@ -25,6 +31,314 @@ except ImportError:
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class PlotlyChartManager:
+    """Manager for Plotly-based interactive charts"""
+    
+    def __init__(self, parent, theme='dark'):
+        self.parent = parent
+        self.theme = theme
+        self.charts = {}
+        self.data_cache = {}
+        self.selected_pids = []
+        self.chart_colors = ['#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FECA57', '#6C5CE7', '#FD79A8', '#FDCB6E']
+        self.color_index = 0
+        self.temp_dir = tempfile.mkdtemp()
+        
+    def get_theme_colors(self):
+        """Get theme-specific colors"""
+        if self.theme == 'dark':
+            return {
+                'background': '#2b2b2b',
+                'paper': '#1e1e1e',
+                'text': '#ffffff',
+                'grid': '#404040',
+                'font_family': 'Arial, sans-serif'
+            }
+        else:
+            return {
+                'background': '#ffffff',
+                'paper': '#f8f9fa',
+                'text': '#000000',
+                'grid': '#e0e0e0',
+                'font_family': 'Arial, sans-serif'
+            }
+    
+    def create_real_time_chart(self, title="Real-time OBD Data", height=600):
+        """Create a real-time chart with multiple PID support"""
+        colors = self.get_theme_colors()
+        
+        fig = go.Figure()
+        
+        # Configure layout for dark/light theme
+        fig.update_layout(
+            title=dict(
+                text=title,
+                font=dict(color=colors['text'], size=16, family=colors['font_family']),
+                x=0.5
+            ),
+            plot_bgcolor=colors['background'],
+            paper_bgcolor=colors['paper'],
+            font=dict(color=colors['text'], family=colors['font_family']),
+            xaxis=dict(
+                title="Time",
+                gridcolor=colors['grid'],
+                color=colors['text'],
+                showgrid=True,
+                type='date'
+            ),
+            yaxis=dict(
+                title="Value",
+                gridcolor=colors['grid'],
+                color=colors['text'],
+                showgrid=True
+            ),
+            height=height,
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1,
+                bgcolor="rgba(0,0,0,0)",
+                bordercolor=colors['text'],
+                borderwidth=1
+            )
+        )
+        
+        return fig
+    
+    def create_dashboard_chart(self, pid_data, chart_type='line'):
+        """Create dashboard-style chart with trend analysis"""
+        colors = self.get_theme_colors()
+        
+        if chart_type == 'gauge':
+            return self.create_gauge_chart(pid_data)
+        elif chart_type == 'sparkline':
+            return self.create_sparkline_chart(pid_data)
+        else:
+            return self.create_trend_chart(pid_data)
+    
+    def create_gauge_chart(self, pid_data):
+        """Create a gauge chart for dashboard"""
+        colors = self.get_theme_colors()
+        
+        fig = go.Figure(go.Indicator(
+            mode = "gauge+number+delta",
+            value = pid_data.get('value', 0),
+            domain = {'x': [0, 1], 'y': [0, 1]},
+            title = {'text': pid_data.get('name', 'PID')},
+            delta = {'reference': pid_data.get('reference', 0)},
+            gauge = {
+                'axis': {'range': [None, pid_data.get('max_value', 100)]},
+                'bar': {'color': self.chart_colors[self.color_index % len(self.chart_colors)]},
+                'steps': [
+                    {'range': [0, pid_data.get('warning_threshold', 50)], 'color': "lightgray"},
+                    {'range': [pid_data.get('warning_threshold', 50), pid_data.get('critical_threshold', 75)], 'color': "yellow"},
+                    {'range': [pid_data.get('critical_threshold', 75), pid_data.get('max_value', 100)], 'color': "red"}
+                ],
+                'threshold': {
+                    'line': {'color': "red", 'width': 4},
+                    'thickness': 0.75,
+                    'value': pid_data.get('critical_threshold', 75)
+                }
+            }
+        ))
+        
+        fig.update_layout(
+            paper_bgcolor=colors['paper'],
+            plot_bgcolor=colors['background'],
+            font=dict(color=colors['text'], family=colors['font_family']),
+            height=300
+        )
+        
+        return fig
+    
+    def create_sparkline_chart(self, pid_data):
+        """Create a sparkline chart for compact display"""
+        colors = self.get_theme_colors()
+        
+        x_data = pid_data.get('timestamps', [])
+        y_data = pid_data.get('values', [])
+        
+        fig = go.Figure()
+        
+        fig.add_trace(go.Scatter(
+            x=x_data,
+            y=y_data,
+            mode='lines',
+            line=dict(color=self.chart_colors[self.color_index % len(self.chart_colors)], width=2),
+            fill='tonexty',
+            fillcolor=f"rgba({','.join(map(str, [int(self.chart_colors[self.color_index % len(self.chart_colors)][1:3], 16), int(self.chart_colors[self.color_index % len(self.chart_colors)][3:5], 16), int(self.chart_colors[self.color_index % len(self.chart_colors)][5:7], 16)]))}, 0.2)",
+            showlegend=False
+        ))
+        
+        fig.update_layout(
+            paper_bgcolor=colors['paper'],
+            plot_bgcolor=colors['background'],
+            font=dict(color=colors['text'], family=colors['font_family']),
+            height=100,
+            margin=dict(l=0, r=0, t=0, b=0),
+            showlegend=False,
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False)
+        )
+        
+        return fig
+    
+    def create_trend_chart(self, pid_data):
+        """Create a trend analysis chart"""
+        colors = self.get_theme_colors()
+        
+        fig = make_subplots(
+            rows=2, cols=1,
+            subplot_titles=('Real-time Values', 'Min/Max/Avg Trends'),
+            vertical_spacing=0.1,
+            row_heights=[0.7, 0.3]
+        )
+        
+        x_data = pid_data.get('timestamps', [])
+        y_data = pid_data.get('values', [])
+        
+        # Main trend line
+        fig.add_trace(
+            go.Scatter(
+                x=x_data,
+                y=y_data,
+                mode='lines',
+                name='Current Value',
+                line=dict(color=self.chart_colors[0], width=2),
+                hovertemplate='<b>%{y:.2f}</b><br>%{x}<extra></extra>'
+            ),
+            row=1, col=1
+        )
+        
+        # Min/Max envelope
+        if len(y_data) > 1:
+            min_vals = [min(y_data[:i+1]) for i in range(len(y_data))]
+            max_vals = [max(y_data[:i+1]) for i in range(len(y_data))]
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=x_data,
+                    y=max_vals,
+                    mode='lines',
+                    name='Max',
+                    line=dict(color=self.chart_colors[1], width=1),
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+            
+            fig.add_trace(
+                go.Scatter(
+                    x=x_data,
+                    y=min_vals,
+                    mode='lines',
+                    name='Min',
+                    line=dict(color=self.chart_colors[2], width=1),
+                    fill='tonexty',
+                    fillcolor=f"rgba({','.join(map(str, [int(self.chart_colors[1][1:3], 16), int(self.chart_colors[1][3:5], 16), int(self.chart_colors[1][5:7], 16)]))}, 0.2)",
+                    showlegend=False
+                ),
+                row=2, col=1
+            )
+        
+        fig.update_layout(
+            paper_bgcolor=colors['paper'],
+            plot_bgcolor=colors['background'],
+            font=dict(color=colors['text'], family=colors['font_family']),
+            height=500,
+            hovermode='x unified',
+            showlegend=True
+        )
+        
+        return fig
+    
+    def update_chart_data(self, chart_id, pid_name, timestamp, value):
+        """Update chart data for real-time updates"""
+        if chart_id not in self.data_cache:
+            self.data_cache[chart_id] = {}
+        
+        if pid_name not in self.data_cache[chart_id]:
+            self.data_cache[chart_id][pid_name] = {'timestamps': [], 'values': []}
+        
+        # Add new data point
+        self.data_cache[chart_id][pid_name]['timestamps'].append(timestamp)
+        self.data_cache[chart_id][pid_name]['values'].append(value)
+        
+        # Limit data points to last 100 for performance
+        if len(self.data_cache[chart_id][pid_name]['timestamps']) > 100:
+            self.data_cache[chart_id][pid_name]['timestamps'] = self.data_cache[chart_id][pid_name]['timestamps'][-100:]
+            self.data_cache[chart_id][pid_name]['values'] = self.data_cache[chart_id][pid_name]['values'][-100:]
+    
+    def generate_chart_html(self, fig, chart_id):
+        """Generate HTML for chart embedding"""
+        html_content = fig.to_html(
+            include_plotlyjs='cdn',
+            div_id=chart_id,
+            config={
+                'displayModeBar': True,
+                'displaylogo': False,
+                'modeBarButtonsToRemove': ['select2d', 'lasso2d'],
+                'responsive': True
+            }
+        )
+        
+        # Add custom styling for dark/light theme
+        colors = self.get_theme_colors()
+        custom_css = f"""
+        <style>
+            body {{
+                background-color: {colors['background']};
+                color: {colors['text']};
+                font-family: {colors['font_family']};
+                margin: 0;
+                padding: 0;
+            }}
+            .plotly-graph-div {{
+                background-color: {colors['background']};
+            }}
+        </style>
+        """
+        
+        html_content = html_content.replace('<head>', f'<head>{custom_css}')
+        return html_content
+    
+    def save_chart_html(self, fig, chart_id):
+        """Save chart as HTML file and return path"""
+        html_content = self.generate_chart_html(fig, chart_id)
+        html_path = os.path.join(self.temp_dir, f'{chart_id}.html')
+        
+        with open(html_path, 'w', encoding='utf-8') as f:
+            f.write(html_content)
+        
+        return html_path
+    
+    def set_theme(self, theme):
+        """Update theme for all charts"""
+        self.theme = theme
+        # Refresh all active charts with new theme
+        for chart_id in self.charts:
+            self.refresh_chart(chart_id)
+    
+    def refresh_chart(self, chart_id):
+        """Refresh a specific chart"""
+        if chart_id in self.charts:
+            chart_info = self.charts[chart_id]
+            # This would trigger a chart update in the UI
+            pass
+    
+    def cleanup(self):
+        """Clean up temporary files"""
+        import shutil
+        try:
+            shutil.rmtree(self.temp_dir)
+        except:
+            pass
 
 
 class EnhancedOBDMonitor:
@@ -62,6 +376,13 @@ class EnhancedOBDMonitor:
 
         # Session tracking
         self.session_start_time = datetime.datetime.now()
+
+        # Initialize Plotly chart manager
+        self.plotly_manager = PlotlyChartManager(self.root, self.config['appearance']['mode'])
+        
+        # Chart state
+        self.charting_active = False
+        self.chart_thread = None
 
         # Setup UI components
         self.setup_ui()
@@ -346,6 +667,10 @@ class EnhancedOBDMonitor:
         # Charts tab
         self.charts_tab = self.notebook.add("Charts")
         self.setup_charts_tab()
+        
+        # Advanced Dashboard tab (new Plotly-based)
+        self.advanced_dashboard_tab = self.notebook.add("Advanced Dashboard")
+        self.setup_advanced_dashboard_tab()
 
         # DTCs tab
         self.dtcs_tab = self.notebook.add("DTCs")
@@ -493,7 +818,7 @@ class EnhancedOBDMonitor:
         h_scrollbar.pack(side="bottom", fill="x")
 
     def setup_charts_tab(self):
-        """Setup real-time charts tab"""
+        """Setup real-time charts tab with Plotly integration"""
         charts_frame = ctk.CTkFrame(self.charts_tab)
         charts_frame.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -501,48 +826,425 @@ class EnhancedOBDMonitor:
         controls_frame = ctk.CTkFrame(charts_frame)
         controls_frame.pack(fill="x", pady=5)
 
-        ctk.CTkLabel(controls_frame, text="Real-time Charts",
+        ctk.CTkLabel(controls_frame, text="Interactive Real-time Charts (Plotly)",
                      font=ctk.CTkFont(size=16, weight="bold")).pack(side="left", padx=10)
 
-        # PID selection for charting
-        ctk.CTkLabel(controls_frame, text="Chart PID:").pack(
-            side="left", padx=5)
-        self.chart_pid_var = tk.StringVar()
-        self.chart_pid_combo = ctk.CTkComboBox(
-            controls_frame, variable=self.chart_pid_var, width=200)
-        self.chart_pid_combo.pack(side="left", padx=5)
+        # Multi-PID selection for charting
+        pid_selection_frame = ctk.CTkFrame(controls_frame)
+        pid_selection_frame.pack(side="left", padx=20)
+        
+        ctk.CTkLabel(pid_selection_frame, text="Select PIDs:").pack(side="left", padx=5)
+        self.selected_pids_var = tk.StringVar()
+        self.selected_pids_listbox = tk.Listbox(pid_selection_frame, selectmode=tk.MULTIPLE, height=3, width=30)
+        self.selected_pids_listbox.pack(side="left", padx=5)
+        
+        # Chart type selection
+        ctk.CTkLabel(pid_selection_frame, text="Chart Type:").pack(side="left", padx=5)
+        self.chart_type_var = tk.StringVar(value="line")
+        chart_type_combo = ctk.CTkComboBox(pid_selection_frame, variable=self.chart_type_var,
+                                          values=["line", "scatter", "bar"], width=100)
+        chart_type_combo.pack(side="left", padx=5)
 
         # Chart controls
-        start_chart_btn = ctk.CTkButton(
-            controls_frame, text="Start Chart", command=self.start_charting, width=100)
-        start_chart_btn.pack(side="left", padx=5)
+        chart_controls_frame = ctk.CTkFrame(controls_frame)
+        chart_controls_frame.pack(side="right", padx=10)
+        
+        start_plotly_chart_btn = ctk.CTkButton(
+            chart_controls_frame, text="Start Plotly Chart", command=self.start_plotly_charting, width=120)
+        start_plotly_chart_btn.pack(side="left", padx=5)
 
-        stop_chart_btn = ctk.CTkButton(
-            controls_frame, text="Stop Chart", command=self.stop_charting, width=100)
-        stop_chart_btn.pack(side="left", padx=5)
+        stop_plotly_chart_btn = ctk.CTkButton(
+            chart_controls_frame, text="Stop Chart", command=self.stop_plotly_charting, width=100)
+        stop_plotly_chart_btn.pack(side="left", padx=5)
+        
+        refresh_chart_btn = ctk.CTkButton(
+            chart_controls_frame, text="Refresh", command=self.refresh_plotly_chart, width=80)
+        refresh_chart_btn.pack(side="left", padx=5)
 
-        # Chart display
-        self.chart_frame = ctk.CTkFrame(charts_frame)
-        self.chart_frame.pack(fill="both", expand=True, pady=5)
+        # Main chart display area
+        chart_display_frame = ctk.CTkFrame(charts_frame)
+        chart_display_frame.pack(fill="both", expand=True, pady=5)
+        
+        # Create notebook for multiple chart views
+        self.chart_notebook = ctk.CTkTabview(chart_display_frame)
+        self.chart_notebook.pack(fill="both", expand=True, padx=5, pady=5)
+        
+        # Plotly chart tab
+        self.plotly_chart_tab = self.chart_notebook.add("Interactive Chart")
+        self.setup_plotly_chart_widget()
+        
+        # Legacy matplotlib tab (commented out but kept for reference)
+        # self.matplotlib_tab = self.chart_notebook.add("Legacy Chart")
+        # self.setup_matplotlib_chart_legacy()
 
-        # Initialize matplotlib chart
-        self.setup_matplotlib_chart()
+    def setup_plotly_chart_widget(self):
+        """Setup the Plotly chart widget using tkinterweb"""
+        try:
+            # Create tkinterweb HTML widget for Plotly charts
+            self.plotly_widget = tkinterweb.HtmlFrame(self.plotly_chart_tab, messages_enabled=False)
+            self.plotly_widget.pack(fill="both", expand=True, padx=5, pady=5)
+            
+            # Load initial empty chart
+            self.load_initial_plotly_chart()
+            
+        except Exception as e:
+            logger.error(f"Error setting up Plotly widget: {str(e)}")
+            # Fallback to label if tkinterweb fails
+            error_label = ctk.CTkLabel(self.plotly_chart_tab, 
+                                     text=f"Error loading Plotly widget: {str(e)}\nPlease check tkinterweb installation.")
+            error_label.pack(expand=True)
+    
+    def load_initial_plotly_chart(self):
+        """Load an initial empty Plotly chart"""
+        try:
+            initial_fig = self.plotly_manager.create_real_time_chart("Select PIDs and Start Monitoring")
+            html_path = self.plotly_manager.save_chart_html(initial_fig, "main_chart")
+            self.plotly_widget.load_file(html_path)
+        except Exception as e:
+            logger.error(f"Error loading initial Plotly chart: {str(e)}")
+    
+    def start_plotly_charting(self):
+        """Start real-time Plotly charting for selected PIDs"""
+        try:
+            # Get selected PIDs from listbox
+            selected_indices = self.selected_pids_listbox.curselection()
+            if not selected_indices:
+                messagebox.showwarning("No PIDs Selected", "Please select one or more PIDs to chart")
+                return
+            
+            selected_pids = [self.selected_pids_listbox.get(i) for i in selected_indices]
+            
+            if not self.is_connected:
+                messagebox.showwarning("Not Connected", "Please connect to OBD device first")
+                return
+            
+            # Update plotly manager with selected PIDs
+            self.plotly_manager.selected_pids = selected_pids
+            
+            # Start charting
+            self.charting_active = True
+            self.chart_thread = threading.Thread(target=self.update_plotly_chart, daemon=True)
+            self.chart_thread.start()
+            
+            logger.info(f"Started Plotly charting for PIDs: {selected_pids}")
+            
+        except Exception as e:
+            logger.error(f"Error starting Plotly charting: {str(e)}")
+            messagebox.showerror("Charting Error", f"Failed to start charting: {str(e)}")
+    
+    def stop_plotly_charting(self):
+        """Stop real-time Plotly charting"""
+        try:
+            self.charting_active = False
+            if hasattr(self, 'chart_thread') and self.chart_thread and self.chart_thread.is_alive():
+                self.chart_thread.join(timeout=1)
+            
+            logger.info("Stopped Plotly charting")
+            
+        except Exception as e:
+            logger.error(f"Error stopping Plotly charting: {str(e)}")
+    
+    def update_plotly_chart(self):
+        """Update Plotly chart with real-time data"""
+        try:
+            chart_id = "main_chart"
+            
+            while self.charting_active and self.is_connected:
+                # Create new figure for real-time update
+                fig = self.plotly_manager.create_real_time_chart(
+                    f"Real-time Data: {', '.join(self.plotly_manager.selected_pids)}"
+                )
+                
+                # Add traces for each selected PID
+                for i, pid_name in enumerate(self.plotly_manager.selected_pids):
+                    if pid_name in self.pid_data:
+                        # Get cached data for this PID
+                        if chart_id in self.plotly_manager.data_cache and pid_name in self.plotly_manager.data_cache[chart_id]:
+                            data = self.plotly_manager.data_cache[chart_id][pid_name]
+                            
+                            fig.add_trace(go.Scatter(
+                                x=data['timestamps'],
+                                y=data['values'],
+                                mode='lines+markers',
+                                name=f"{pid_name} ({self.pid_data[pid_name].get('unit', '')})",
+                                line=dict(color=self.plotly_manager.chart_colors[i % len(self.plotly_manager.chart_colors)], width=2),
+                                marker=dict(size=4),
+                                hovertemplate=f'<b>{pid_name}</b><br>Value: %{{y}}<br>Time: %{{x}}<extra></extra>'
+                            ))
+                
+                # Update chart in main thread
+                self.root.after(0, self.refresh_plotly_chart_with_figure, fig)
+                
+                time.sleep(1)  # Update every second
+                
+        except Exception as e:
+            logger.error(f"Error updating Plotly chart: {str(e)}")
+    
+    def refresh_plotly_chart(self):
+        """Refresh the Plotly chart display"""
+        try:
+            if hasattr(self, 'plotly_widget') and self.plotly_widget:
+                self.load_initial_plotly_chart()
+        except Exception as e:
+            logger.error(f"Error refreshing Plotly chart: {str(e)}")
+    
+    def refresh_plotly_chart_with_figure(self, fig):
+        """Refresh Plotly chart with specific figure"""
+        try:
+            if hasattr(self, 'plotly_widget') and self.plotly_widget:
+                html_path = self.plotly_manager.save_chart_html(fig, "main_chart")
+                self.plotly_widget.load_file(html_path)
+        except Exception as e:
+            logger.error(f"Error refreshing Plotly chart with figure: {str(e)}")
 
-    def setup_matplotlib_chart(self):
-        """Setup matplotlib chart for real-time data"""
-        self.fig, self.ax = plt.subplots(figsize=(12, 6), facecolor='#2b2b2b')
-        self.ax.set_facecolor('#2b2b2b')
-        self.ax.tick_params(colors='white')
-        self.ax.xaxis.label.set_color('white')
-        self.ax.yaxis.label.set_color('white')
-        self.ax.title.set_color('white')
-
-        self.canvas = FigureCanvasTkAgg(self.fig, self.chart_frame)
-        self.canvas.get_tk_widget().pack(fill="both", expand=True)
-
-        # Initialize empty data
-        self.chart_data = {'x': [], 'y': []}
-        self.chart_line, = self.ax.plot([], [], 'cyan', linewidth=2)
+    # def setup_matplotlib_chart(self):
+    #     """Setup matplotlib chart for real-time data - LEGACY VERSION"""
+    #     # This is kept for reference but commented out in favor of Plotly
+    #     self.fig, self.ax = plt.subplots(figsize=(12, 6), facecolor='#2b2b2b')
+    #     self.ax.set_facecolor('#2b2b2b')
+    #     self.ax.tick_params(colors='white')
+    #     self.ax.xaxis.label.set_color('white')
+    #     self.ax.yaxis.label.set_color('white')
+    #     self.ax.title.set_color('white')
+    #
+    #     self.canvas = FigureCanvasTkAgg(self.fig, self.chart_frame)
+    #     self.canvas.get_tk_widget().pack(fill="both", expand=True)
+    #
+    #     # Initialize empty data
+    #     self.chart_data = {'x': [], 'y': []}
+    #     self.chart_line, = self.ax.plot([], [], 'cyan', linewidth=2)
+    
+    def setup_advanced_dashboard_tab(self):
+        """Setup advanced dashboard tab with Plotly visualizations"""
+        dashboard_frame = ctk.CTkScrollableFrame(self.advanced_dashboard_tab)
+        dashboard_frame.pack(fill="both", expand=True, padx=10, pady=10)
+        
+        # Dashboard header
+        header_frame = ctk.CTkFrame(dashboard_frame)
+        header_frame.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(header_frame, text="Advanced Analytics Dashboard",
+                     font=ctk.CTkFont(size=18, weight="bold")).pack(side="left", padx=10, pady=10)
+        
+        # Dashboard controls
+        controls_frame = ctk.CTkFrame(header_frame)
+        controls_frame.pack(side="right", padx=10, pady=5)
+        
+        # Theme toggle
+        self.dashboard_theme_var = tk.StringVar(value=self.config['appearance']['mode'])
+        theme_combo = ctk.CTkComboBox(controls_frame, variable=self.dashboard_theme_var,
+                                     values=["dark", "light"], width=80)
+        theme_combo.pack(side="left", padx=5)
+        theme_combo.configure(command=self.update_dashboard_theme)
+        
+        # Refresh button
+        refresh_dashboard_btn = ctk.CTkButton(
+            controls_frame, text="Refresh", command=self.refresh_dashboard, width=80)
+        refresh_dashboard_btn.pack(side="left", padx=5)
+        
+        # Main dashboard grid
+        self.dashboard_grid = ctk.CTkFrame(dashboard_frame)
+        self.dashboard_grid.pack(fill="both", expand=True, pady=10)
+        
+        # Create dashboard sections
+        self.create_dashboard_sections()
+    
+    def create_dashboard_sections(self):
+        """Create different sections of the advanced dashboard"""
+        # Section 1: Gauges Row
+        gauges_frame = ctk.CTkFrame(self.dashboard_grid)
+        gauges_frame.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(gauges_frame, text="Live Gauges",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+        
+        self.gauges_container = ctk.CTkFrame(gauges_frame)
+        self.gauges_container.pack(fill="x", padx=10, pady=5)
+        
+        # Section 2: Trend Analysis
+        trends_frame = ctk.CTkFrame(self.dashboard_grid)
+        trends_frame.pack(fill="both", expand=True, pady=5)
+        
+        ctk.CTkLabel(trends_frame, text="Trend Analysis",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+        
+        self.trends_container = ctk.CTkFrame(trends_frame)
+        self.trends_container.pack(fill="both", expand=True, padx=10, pady=5)
+        
+        # Section 3: Sparklines
+        sparklines_frame = ctk.CTkFrame(self.dashboard_grid)
+        sparklines_frame.pack(fill="x", pady=5)
+        
+        ctk.CTkLabel(sparklines_frame, text="Mini Charts (Sparklines)",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+        
+        self.sparklines_container = ctk.CTkFrame(sparklines_frame)
+        self.sparklines_container.pack(fill="x", padx=10, pady=5)
+        
+        # Initialize dashboard widgets
+        self.setup_dashboard_widgets()
+    
+    def setup_dashboard_widgets(self):
+        """Setup individual dashboard widgets"""
+        # Create placeholder widgets that will be populated with data
+        self.dashboard_widgets_dict = {}
+        
+        # Gauges for key metrics
+        key_metrics = ['RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP']
+        
+        for i, metric in enumerate(key_metrics):
+            gauge_widget = ctk.CTkFrame(self.gauges_container)
+            gauge_widget.grid(row=0, column=i, padx=5, pady=5, sticky="ew")
+            self.gauges_container.grid_columnconfigure(i, weight=1)
+            
+            # Create tkinterweb widget for gauge
+            try:
+                gauge_html_widget = tkinterweb.HtmlFrame(gauge_widget, messages_enabled=False)
+                gauge_html_widget.pack(fill="both", expand=True, padx=2, pady=2)
+                
+                self.dashboard_widgets_dict[f'{metric}_gauge'] = gauge_html_widget
+                
+                # Load initial empty gauge
+                self.load_gauge_chart(metric, gauge_html_widget)
+                
+            except Exception as e:
+                logger.error(f"Error creating gauge widget for {metric}: {str(e)}")
+                # Fallback to label
+                ctk.CTkLabel(gauge_widget, text=f"{metric}\n--").pack(expand=True)
+        
+        # Trend analysis widget
+        try:
+            self.trends_widget = tkinterweb.HtmlFrame(self.trends_container, messages_enabled=False)
+            self.trends_widget.pack(fill="both", expand=True, padx=5, pady=5)
+            self.load_trends_chart()
+        except Exception as e:
+            logger.error(f"Error creating trends widget: {str(e)}")
+            ctk.CTkLabel(self.trends_container, text="Trends widget error").pack(expand=True)
+        
+        # Sparklines
+        sparkline_metrics = ['RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP', 'INTAKE_TEMP', 'THROTTLE_POS']
+        
+        for i, metric in enumerate(sparkline_metrics):
+            sparkline_frame = ctk.CTkFrame(self.sparklines_container)
+            sparkline_frame.grid(row=i//3, column=i%3, padx=5, pady=5, sticky="ew")
+            self.sparklines_container.grid_columnconfigure(i%3, weight=1)
+            
+            # Label for metric name
+            ctk.CTkLabel(sparkline_frame, text=metric, font=ctk.CTkFont(size=10)).pack(pady=2)
+            
+            try:
+                sparkline_widget = tkinterweb.HtmlFrame(sparkline_frame, messages_enabled=False)
+                sparkline_widget.pack(fill="both", expand=True, padx=2, pady=2)
+                
+                self.dashboard_widgets_dict[f'{metric}_sparkline'] = sparkline_widget
+                self.load_sparkline_chart(metric, sparkline_widget)
+                
+            except Exception as e:
+                logger.error(f"Error creating sparkline widget for {metric}: {str(e)}")
+                ctk.CTkLabel(sparkline_frame, text="--").pack(expand=True)
+    
+    def load_gauge_chart(self, metric, widget):
+        """Load gauge chart for a specific metric"""
+        try:
+            # Get data for the metric
+            pid_data = self.pid_data.get(metric, {
+                'value': 0,
+                'name': metric,
+                'max_value': 100,
+                'warning_threshold': 75,
+                'critical_threshold': 90
+            })
+            
+            fig = self.plotly_manager.create_gauge_chart(pid_data)
+            html_path = self.plotly_manager.save_chart_html(fig, f'{metric}_gauge')
+            widget.load_file(html_path)
+            
+        except Exception as e:
+            logger.error(f"Error loading gauge chart for {metric}: {str(e)}")
+    
+    def load_trends_chart(self):
+        """Load trends analysis chart"""
+        try:
+            # Create a combined trends chart
+            fig = self.plotly_manager.create_real_time_chart("Trends Analysis", height=400)
+            
+            # Add sample data if available
+            for pid_name, data in self.pid_data.items():
+                if pid_name in ['RPM', 'SPEED', 'ENGINE_LOAD']:
+                    timestamps = [datetime.datetime.now() - datetime.timedelta(minutes=i) for i in range(10, 0, -1)]
+                    values = [data.get('value', 0) + (i * 0.1) for i in range(10)]
+                    
+                    fig.add_trace(go.Scatter(
+                        x=timestamps,
+                        y=values,
+                        mode='lines',
+                        name=pid_name,
+                        line=dict(width=2)
+                    ))
+            
+            html_path = self.plotly_manager.save_chart_html(fig, 'trends_chart')
+            self.trends_widget.load_file(html_path)
+            
+        except Exception as e:
+            logger.error(f"Error loading trends chart: {str(e)}")
+    
+    def load_sparkline_chart(self, metric, widget):
+        """Load sparkline chart for a specific metric"""
+        try:
+            # Generate sample sparkline data
+            timestamps = [datetime.datetime.now() - datetime.timedelta(minutes=i) for i in range(20, 0, -1)]
+            values = [50 + (i * 2) + (i % 3) for i in range(20)]
+            
+            pid_data = {
+                'timestamps': timestamps,
+                'values': values,
+                'name': metric
+            }
+            
+            fig = self.plotly_manager.create_sparkline_chart(pid_data)
+            html_path = self.plotly_manager.save_chart_html(fig, f'{metric}_sparkline')
+            widget.load_file(html_path)
+            
+        except Exception as e:
+            logger.error(f"Error loading sparkline chart for {metric}: {str(e)}")
+    
+    def update_dashboard_theme(self, theme=None):
+        """Update dashboard theme"""
+        try:
+            if theme:
+                self.plotly_manager.set_theme(theme)
+                self.config['appearance']['mode'] = theme
+                ctk.set_appearance_mode(theme)
+                
+                # Refresh all dashboard widgets
+                self.refresh_dashboard()
+                
+        except Exception as e:
+            logger.error(f"Error updating dashboard theme: {str(e)}")
+    
+    def refresh_dashboard(self):
+        """Refresh all dashboard widgets"""
+        try:
+            # Refresh gauges
+            for metric in ['RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP']:
+                gauge_key = f'{metric}_gauge'
+                if gauge_key in self.dashboard_widgets_dict:
+                    self.load_gauge_chart(metric, self.dashboard_widgets_dict[gauge_key])
+            
+            # Refresh trends
+            if hasattr(self, 'trends_widget'):
+                self.load_trends_chart()
+            
+            # Refresh sparklines
+            for metric in ['RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP', 'INTAKE_TEMP', 'THROTTLE_POS']:
+                sparkline_key = f'{metric}_sparkline'
+                if sparkline_key in self.dashboard_widgets_dict:
+                    self.load_sparkline_chart(metric, self.dashboard_widgets_dict[sparkline_key])
+            
+            logger.info("Dashboard refreshed")
+            
+        except Exception as e:
+            logger.error(f"Error refreshing dashboard: {str(e)}")
 
     def setup_enhanced_dtcs_tab(self):
         """Setup enhanced DTCs tab"""
@@ -938,95 +1640,96 @@ class EnhancedOBDMonitor:
                     data.get('status', 'OK')
                 ))
 
-    def start_charting(self):
-        """Start real-time charting for selected PID"""
-        selected_pid = self.chart_pid_var.get()
-        if not selected_pid:
-            messagebox.showwarning(
-                "No PID Selected", "Please select a PID to chart")
-            return
-
-        if not self.is_connected:
-            messagebox.showwarning(
-                "Not Connected", "Please connect to OBD device first")
-            return
-
-        # Initialize chart data
-        self.chart_data = {'x': [], 'y': []}
-        self.charting_active = True
-
-        # Start chart update thread
-        self.chart_thread = threading.Thread(
-            target=self.update_chart, daemon=True)
-        self.chart_thread.start()
-
-        logger.info(f"Started charting for PID: {selected_pid}")
-
-    def stop_charting(self):
-        """Stop real-time charting"""
-        self.charting_active = False
-        if hasattr(self, 'chart_thread') and self.chart_thread.is_alive():
-            self.chart_thread.join(timeout=1)
-
-        logger.info("Stopped charting")
-
-    def update_chart(self):
-        """Update chart with real-time data"""
-        selected_pid = self.chart_pid_var.get()
-
-        while self.charting_active and self.is_connected:
-            try:
-                # Get current value for selected PID
-                if selected_pid in self.pid_data:
-                    current_time = time.time()
-                    current_value = self.pid_data[selected_pid].get('value', 0)
-
-                    # Try to convert to float
-                    try:
-                        current_value = float(current_value)
-                    except (ValueError, TypeError):
-                        current_value = 0
-
-                    # Add to chart data
-                    self.chart_data['x'].append(current_time)
-                    self.chart_data['y'].append(current_value)
-
-                    # Limit data points to last 100
-                    if len(self.chart_data['x']) > 100:
-                        self.chart_data['x'] = self.chart_data['x'][-100:]
-                        self.chart_data['y'] = self.chart_data['y'][-100:]
-
-                    # Update chart in main thread
-                    self.root.after(0, self.refresh_chart)
-
-                time.sleep(0.5)  # Update every 500ms
-
-            except Exception as e:
-                logger.error(f"Error updating chart: {str(e)}")
-                break
-
-    def refresh_chart(self):
-        """Refresh the matplotlib chart"""
-        if not hasattr(self, 'chart_line') or not self.chart_data['x']:
-            return
-
-        try:
-            # Update chart data
-            self.chart_line.set_data(
-                self.chart_data['x'], self.chart_data['y'])
-
-            # Update axes
-            if self.chart_data['x']:
-                self.ax.set_xlim(
-                    min(self.chart_data['x']), max(self.chart_data['x']))
-                self.ax.set_ylim(
-                    min(self.chart_data['y']) - 1, max(self.chart_data['y']) + 1)
-
-            # Refresh canvas
-            self.canvas.draw()
-
-        except Exception as e:
-            logger.error(f"Error refreshing chart: {str(e)}")
+    # Legacy matplotlib methods - commented out but kept for reference
+    # def start_charting(self):
+    #     """Start real-time charting for selected PID - LEGACY MATPLOTLIB VERSION"""
+    #     selected_pid = self.chart_pid_var.get()
+    #     if not selected_pid:
+    #         messagebox.showwarning(
+    #             "No PID Selected", "Please select a PID to chart")
+    #         return
+    #
+    #     if not self.is_connected:
+    #         messagebox.showwarning(
+    #             "Not Connected", "Please connect to OBD device first")
+    #         return
+    #
+    #     # Initialize chart data
+    #     self.chart_data = {'x': [], 'y': []}
+    #     self.charting_active = True
+    #
+    #     # Start chart update thread
+    #     self.chart_thread = threading.Thread(
+    #         target=self.update_chart, daemon=True)
+    #     self.chart_thread.start()
+    #
+    #     logger.info(f"Started charting for PID: {selected_pid}")
+    #
+    # def stop_charting(self):
+    #     """Stop real-time charting - LEGACY MATPLOTLIB VERSION"""
+    #     self.charting_active = False
+    #     if hasattr(self, 'chart_thread') and self.chart_thread.is_alive():
+    #         self.chart_thread.join(timeout=1)
+    #
+    #     logger.info("Stopped charting")
+    #
+    # def update_chart(self):
+    #     """Update chart with real-time data - LEGACY MATPLOTLIB VERSION"""
+    #     selected_pid = self.chart_pid_var.get()
+    #
+    #     while self.charting_active and self.is_connected:
+    #         try:
+    #             # Get current value for selected PID
+    #             if selected_pid in self.pid_data:
+    #                 current_time = time.time()
+    #                 current_value = self.pid_data[selected_pid].get('value', 0)
+    #
+    #                 # Try to convert to float
+    #                 try:
+    #                     current_value = float(current_value)
+    #                 except (ValueError, TypeError):
+    #                     current_value = 0
+    #
+    #                 # Add to chart data
+    #                 self.chart_data['x'].append(current_time)
+    #                 self.chart_data['y'].append(current_value)
+    #
+    #                 # Limit data points to last 100
+    #                 if len(self.chart_data['x']) > 100:
+    #                     self.chart_data['x'] = self.chart_data['x'][-100:]
+    #                     self.chart_data['y'] = self.chart_data['y'][-100:]
+    #
+    #                 # Update chart in main thread
+    #                 self.root.after(0, self.refresh_chart)
+    #
+    #             time.sleep(0.5)  # Update every 500ms
+    #
+    #         except Exception as e:
+    #             logger.error(f"Error updating chart: {str(e)}")
+    #             break
+    #
+    # def refresh_chart(self):
+    #     """Refresh the matplotlib chart - LEGACY VERSION"""
+    #     if not hasattr(self, 'chart_line') or not self.chart_data['x']:
+    #         return
+    #
+    #     try:
+    #         # Update chart data
+    #         self.chart_line.set_data(
+    #             self.chart_data['x'], self.chart_data['y'])
+    #
+    #         # Update axes
+    #         if self.chart_data['x']:
+    #             self.ax.set_xlim(
+    #                 min(self.chart_data['x']), max(self.chart_data['x']))
+    #             self.ax.set_ylim(
+    #                 min(self.chart_data['y']) - 1, max(self.chart_data['y']) + 1)
+    #
+    #         # Refresh canvas
+    #         self.canvas.draw()
+    #
+    #     except Exception as e:
+    #         logger.error(f"Error refreshing chart: {str(e)}")
 
     def refresh_dtcs(self):
         """Refresh DTC data from vehicle"""
@@ -1086,10 +1789,21 @@ class EnhancedOBDMonitor:
     def on_closing(self):
         """Handle window close event: save config and cleanup."""
         try:
+            # Stop any active charting
+            if hasattr(self, 'charting_active'):
+                self.charting_active = False
+            
+            # Cleanup Plotly manager
+            if hasattr(self, 'plotly_manager'):
+                self.plotly_manager.cleanup()
+                
+            # Save configuration
             self.save_config_to_file()
+            
         except Exception as e:
-            logger.error(f"Error saving config on close: {str(e)}")
-        self.root.destroy()
+            logger.error(f"Error during cleanup: {str(e)}")
+        finally:
+            self.root.destroy()
 
     def save_config(self):
         """Save current configuration"""
@@ -1163,11 +1877,17 @@ class EnhancedOBDMonitor:
                 self.available_pids = [
                     'RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP', 'INTAKE_TEMP', 'THROTTLE_POS']
 
-            # Update chart PID combo
+            # Update chart PID combo (legacy)
             if hasattr(self, 'chart_pid_combo'):
                 self.chart_pid_combo.configure(values=self.available_pids)
                 if self.available_pids:
                     self.chart_pid_combo.set(self.available_pids[0])
+            
+            # Update PID listbox for Plotly charts
+            if hasattr(self, 'selected_pids_listbox'):
+                self.selected_pids_listbox.delete(0, tk.END)
+                for pid in self.available_pids:
+                    self.selected_pids_listbox.insert(tk.END, pid)
 
             logger.info(f"Found {len(self.available_pids)} available PIDs")
 
@@ -1267,14 +1987,15 @@ class EnhancedOBDMonitor:
     def update_pid_data(self, pid_name, value, unit):
         """Update PID data storage"""
         try:
-            timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            timestamp = datetime.datetime.now()
+            timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S")
 
             if pid_name not in self.pid_data:
                 self.pid_data[pid_name] = {
                     'name': pid_name,
                     'value': value,
                     'unit': unit,
-                    'timestamp': timestamp,
+                    'timestamp': timestamp_str,
                     'min_value': value,
                     'max_value': value,
                     'status': 'OK'
@@ -1282,7 +2003,7 @@ class EnhancedOBDMonitor:
             else:
                 # Update existing data
                 self.pid_data[pid_name]['value'] = value
-                self.pid_data[pid_name]['timestamp'] = timestamp
+                self.pid_data[pid_name]['timestamp'] = timestamp_str
 
                 # Update min/max values
                 if isinstance(value, (int, float)):
@@ -1296,9 +2017,13 @@ class EnhancedOBDMonitor:
                     if isinstance(current_max, (int, float)) and value > current_max:
                         self.pid_data[pid_name]['max_value'] = value
 
+            # Update Plotly chart data cache
+            if hasattr(self, 'plotly_manager'):
+                self.plotly_manager.update_chart_data("main_chart", pid_name, timestamp, value)
+
             # Add to log data
             self.log_data.append({
-                'timestamp': timestamp,
+                'timestamp': timestamp_str,
                 'pid': pid_name,
                 'name': pid_name,
                 'value': value,
@@ -1484,6 +2209,11 @@ class EnhancedOBDMonitor:
             theme = self.theme_var.get()
             ctk.set_appearance_mode(theme)
             self.config['appearance']['mode'] = theme
+            
+            # Update Plotly theme
+            if hasattr(self, 'plotly_manager'):
+                self.plotly_manager.set_theme(theme)
+            
             logger.info(f"Theme changed to {theme}")
             messagebox.showinfo("Theme Applied", f"Theme changed to {theme}")
         except Exception as e:
