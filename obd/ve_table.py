@@ -64,12 +64,13 @@ class VETableWindow:
         self.log_file = None
         self.csv_writer = None
         self.log_interval = 1000  # ms (1 second by default)
-        self.logs_directory = os.path.join(os.path.dirname(
-            os.path.abspath(__file__)), "logs")
+        # Set logs directory to the specified path on the desktop
+        self.logs_directory = r"C:\Users\d\Desktop\mylogs"
 
         # Create logs directory if it doesn't exist
         if not os.path.exists(self.logs_directory):
             os.makedirs(self.logs_directory)
+            logger.info(f"Created logs directory at {self.logs_directory}")
 
         # Log data history for plotting
         self.log_history = {
@@ -81,8 +82,8 @@ class VETableWindow:
         self.max_history_points = 300  # Store 5 minutes of data at 1s interval
 
         # Set config file path
-        self.config_file = os.path.join(os.path.dirname(
-            os.path.abspath(__file__)), "ve_table_config.json")
+        self.config_file = os.path.join(
+            self.logs_directory, "ve_table_config.json")
 
         # Initialize VE data and visited cells with proper dimensions
         map_count = len(self.map_values)
