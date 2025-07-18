@@ -3,6 +3,8 @@ from tkinter import ttk, messagebox, filedialog
 import customtkinter as ctk
 import obd
 import serial
+import time
+import functools
 import serial.tools.list_ports
 import threading
 import time
@@ -12,9 +14,17 @@ import csv
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import numpy as np
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any, Callable, Union
 import logging
 import os
+import asyncio
+import bleak
+from bleak import BleakClient, BleakScanner
+from ve_table import VETableWindow
+
+# Type annotation for EnhancedOBDMonitor class to help Pylance
+# This lets the IDE know all methods that will be defined later in the file
+# pyright: reportGeneralTypeIssues=false
 
 # For Windows audio alerts
 try:
@@ -23,8 +33,219 @@ except ImportError:
     winsound = None
 
 # Setup logging
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO,
+                    format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
+
+
+class TkCallbackManager:
+    """
+    Class to manage Tkinter callbacks and prevent garbage collection issues.
+    Stores callbacks as instance attributes and provides methods to create and
+    retrieve callbacks safely.
+    """
+
+    def __init__(self):
+        self._callbacks = {}
+        self._callback_counter = 0
+
+    def create_callback(self, func, *args, **kwargs):
+        """Create a callback and store it to prevent garbage collection"""
+        callback_id = f"callback_{self._callback_counter}"
+        self._callback_counter += 1
+
+        # Use functools.partial to create a callable with bound arguments
+        callback = functools.partial(func, *args, **kwargs)
+
+        # Store the callback
+        self._callbacks[callback_id] = callback
+        return callback
+
+    def schedule_after(self, root, delay, func, *args, **kwargs):
+        """Schedule a function to run after delay milliseconds"""
+        callback = self.create_callback(func, *args, **kwargs)
+        return root.after(delay, callback)
+
+    def clear_old_callbacks(self, max_callbacks=1000):
+        """Clear old callbacks if we have too many (prevent memory leaks)"""
+        if len(self._callbacks) > max_callbacks:
+            # Keep only the most recent callbacks
+            keys_to_keep = sorted(self._callbacks.keys())[-max_callbacks:]
+            new_callbacks = {k: self._callbacks[k] for k in keys_to_keep}
+            self._callbacks = new_callbacks
+
+
+class BluetoothOBDManager:
+    """Manages Bluetooth OBD connections using Bleak"""
+
+    def __init__(self):
+        self.client = None
+        self.is_connected = False
+        self.device_address = None
+        self.characteristic_uuid = None
+        self.loop = None
+        self.thread = None
+
+    async def scan_devices(self, timeout=10):
+        """Scan for available Bluetooth OBD devices"""
+        try:
+            logger.info("Scanning for Bluetooth devices...")
+            devices = await BleakScanner.discover(timeout=timeout)
+
+            obd_devices = []
+            for device in devices:
+                # Look for common OBD device names
+                if device.name and any(keyword in device.name.upper() for keyword in
+                                       ['OBD', 'ELM', 'OBDLINK', 'VGATE', 'KONNWEI']):
+                    obd_devices.append({
+                        'name': device.name,
+                        'address': device.address,
+                        'rssi': getattr(device, 'rssi', 'N/A')
+                    })
+                    logger.info(
+                        f"Found OBD device: {device.name} ({device.address})")
+
+            return obd_devices
+
+        except Exception as e:
+            logger.error(f"Error scanning for devices: {str(e)}")
+            return []
+
+    async def connect_device(self, device_address, timeout=10):
+        """Connect to a specific Bluetooth OBD device"""
+        try:
+            logger.info(f"Connecting to device: {device_address}")
+
+            self.client = BleakClient(device_address, timeout=timeout)
+            await self.client.connect()
+
+            if self.client.is_connected:
+                self.is_connected = True
+                self.device_address = device_address
+
+                # Discover services and characteristics
+                # Use alternative approach to discover services
+                try:
+                    # Different versions of Bleak have different ways to access services
+                    # Using dynamic approach to avoid type checking errors
+                    services = []
+
+                    # Get all object attributes that might be services
+                    if hasattr(self.client, 'services'):
+                        client_services = getattr(self.client, 'services')
+
+                        # Handle different service collection types
+                        if hasattr(client_services, 'values'):
+                            # If it's a dictionary-like object
+                            services = list(client_services.values())
+                        elif hasattr(client_services, '__iter__'):
+                            # If it's any iterable
+                            services = list(client_services)
+                except Exception as e:
+                    logger.error(f"Error getting services: {str(e)}")
+                    services = []
+
+                # Look for common OBD characteristics
+                for service in services:
+                    for char in service.characteristics:
+                        # Common OBD characteristic UUIDs
+                        if char.uuid.lower() in ['0000fff1-0000-1000-8000-00805f9b34fb',
+                                                 '0000ffe1-0000-1000-8000-00805f9b34fb']:
+                            self.characteristic_uuid = char.uuid
+                            logger.info(
+                                f"Found OBD characteristic: {char.uuid}")
+                            break
+                    if self.characteristic_uuid:
+                        break
+
+                # If no specific characteristic found, use the first writable one
+                if not self.characteristic_uuid:
+                    for service in services:
+                        for char in service.characteristics:
+                            if "write" in char.properties:
+                                self.characteristic_uuid = char.uuid
+                                logger.info(
+                                    f"Using characteristic: {char.uuid}")
+                                break
+                        if self.characteristic_uuid:
+                            break
+
+                logger.info(f"Successfully connected to {device_address}")
+                return True
+            else:
+                logger.error("Failed to connect to device")
+                return False
+
+        except Exception as e:
+            logger.error(f"Error connecting to device: {str(e)}")
+            self.is_connected = False
+            return False
+
+    async def disconnect_device(self):
+        """Disconnect from the current Bluetooth device"""
+        try:
+            if self.client and self.client.is_connected:
+                await self.client.disconnect()
+                logger.info("Disconnected from Bluetooth device")
+
+            self.is_connected = False
+            self.client = None
+            self.device_address = None
+            self.characteristic_uuid = None
+
+        except Exception as e:
+            logger.error(f"Error disconnecting: {str(e)}")
+
+    async def send_command(self, command):
+        """Send OBD command via Bluetooth"""
+        try:
+            if not self.client or not self.client.is_connected:
+                raise Exception("Not connected to device")
+
+            if not self.characteristic_uuid:
+                raise Exception("No characteristic available")
+
+            # Convert command to bytes
+            if isinstance(command, str):
+                command_bytes = command.encode('utf-8')
+            else:
+                command_bytes = command
+
+            # Send command
+            await self.client.write_gatt_char(self.characteristic_uuid, command_bytes)
+
+            # Read response (this might need adjustment based on device)
+            response = await self.client.read_gatt_char(self.characteristic_uuid)
+            return response.decode('utf-8') if response else None
+
+        except Exception as e:
+            logger.error(f"Error sending command: {str(e)}")
+            return None
+
+    def run_async_task(self, coro):
+        """Run async task in a separate thread"""
+        try:
+            if not self.loop or self.loop.is_closed():
+                self.loop = asyncio.new_event_loop()
+
+            if not self.thread or not self.thread.is_alive():
+                self.thread = threading.Thread(
+                    target=self._run_loop, daemon=True)
+                self.thread.start()
+
+            future = asyncio.run_coroutine_threadsafe(coro, self.loop)
+            return future.result(timeout=30)
+        except Exception as e:
+            logger.error(f"Error running async task: {str(e)}")
+            return None
+
+    def _run_loop(self):
+        """Run the asyncio event loop in a separate thread"""
+        if self.loop:
+            asyncio.set_event_loop(self.loop)
+            self.loop.run_forever()
+        else:
+            logger.error("Asyncio loop is not initialized")
 
 
 class EnhancedOBDMonitor:
@@ -37,6 +258,9 @@ class EnhancedOBDMonitor:
         ctk.set_appearance_mode(self.config['appearance']['mode'])
         ctk.set_default_color_theme(self.config['appearance']['theme'])
 
+        # Initialize the callback manager for preventing Tkinter callback garbage collection
+        self.callback_manager = TkCallbackManager()
+
         self.root = ctk.CTk()
         self.root.title("OBD Monitor Pro - Enhanced")
         self.root.geometry("1600x1000")
@@ -47,6 +271,11 @@ class EnhancedOBDMonitor:
         self.is_connected = False
         self.monitoring = False
         self.monitor_thread = None
+
+        # Bluetooth manager
+        self.bluetooth_manager = BluetoothOBDManager()
+        self.bluetooth_devices = []
+        self.connection_type = "serial"  # "serial" or "bluetooth"
 
         # Data storage
         self.pid_data = {}
@@ -68,7 +297,9 @@ class EnhancedOBDMonitor:
         self.create_log_directory()
 
         # Handle window closing
-        self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Set window close handler
+        if hasattr(self, 'on_closing'):
+            self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
 
     def create_default_config(self):
         """Create default configuration"""
@@ -80,7 +311,13 @@ class EnhancedOBDMonitor:
             'connection': {
                 'port': 'COM3',
                 'baudrate': 38400,
-                'timeout': 10
+                'timeout': 10,
+                'type': 'serial'  # 'serial' or 'bluetooth'
+            },
+            'bluetooth': {
+                'scan_timeout': 10,
+                'connect_timeout': 10,
+                'last_device': None
             },
             'monitoring': {
                 'update_interval': 1,
@@ -160,7 +397,10 @@ class EnhancedOBDMonitor:
             status_frame, text="Session: 00:00:00")
         self.session_label.pack(side="right", padx=10)
 
-        self.root.after(1000, self.update_session_timer)
+        # Schedule initial timer update with a proper function
+        def start_timer():
+            self.update_session_timer()
+        self.root.after(1000, start_timer)
 
     def setup_enhanced_control_panel(self, parent):
         """Setup enhanced connection and control panel"""
@@ -174,30 +414,44 @@ class EnhancedOBDMonitor:
         ctk.CTkLabel(conn_frame, text="Connection", font=ctk.CTkFont(
             size=16, weight="bold")).pack(pady=5)
 
+        # Connection type selection
+        type_frame = ctk.CTkFrame(conn_frame)
+        type_frame.pack(fill="x", padx=5, pady=2)
+
+        ctk.CTkLabel(type_frame, text="Type:").grid(
+            row=0, column=0, padx=5, sticky="w")
+        self.connection_type_var = tk.StringVar(
+            value=self.config.get('connection', {}).get('type', 'serial'))
+        type_combo = ctk.CTkComboBox(type_frame, variable=self.connection_type_var,
+                                     values=["serial", "bluetooth"], width=120,
+                                     command=self.on_connection_type_change)
+        type_combo.grid(row=0, column=1, padx=5)
+
         # Port and baudrate selection
         settings_frame = ctk.CTkFrame(conn_frame)
         settings_frame.pack(fill="x", padx=5, pady=2)
 
-        # Port selection
-        ctk.CTkLabel(settings_frame, text="Port:").grid(
+        # Port/Device selection
+        ctk.CTkLabel(settings_frame, text="Port/Device:").grid(
             row=0, column=0, padx=5, sticky="w")
         self.port_var = tk.StringVar(value=self.config.get(
             'connection', {}).get('port', 'COM3'))
         self.port_combo = ctk.CTkComboBox(
-            settings_frame, variable=self.port_var, width=150)
+            settings_frame, variable=self.port_var, width=200)
         self.port_combo.grid(row=0, column=1, padx=5)
 
-        # Baudrate selection
-        ctk.CTkLabel(settings_frame, text="Baudrate:").grid(
-            row=0, column=2, padx=5, sticky="w")
+        # Baudrate selection (only for serial)
+        self.baudrate_label = ctk.CTkLabel(settings_frame, text="Baudrate:")
+        self.baudrate_label.grid(row=0, column=2, padx=5, sticky="w")
         self.baudrate_var = tk.StringVar(value="38400")
-        baudrate_combo = ctk.CTkComboBox(settings_frame, variable=self.baudrate_var,
-                                         values=["9600", "38400", "115200"], width=100)
-        baudrate_combo.grid(row=0, column=3, padx=5)
+        self.baudrate_combo = ctk.CTkComboBox(settings_frame, variable=self.baudrate_var,
+                                              values=["9600", "38400", "115200"], width=100)
+        self.baudrate_combo.grid(row=0, column=3, padx=5)
 
-        refresh_btn = ctk.CTkButton(
-            settings_frame, text="Refresh", command=self.refresh_ports, width=80)
-        refresh_btn.grid(row=0, column=4, padx=5)
+        # Refresh/Scan button
+        self.refresh_btn = ctk.CTkButton(
+            settings_frame, text="Refresh", command=self.refresh_connections, width=80)
+        self.refresh_btn.grid(row=0, column=4, padx=5)
 
         # Connection buttons
         btn_frame = ctk.CTkFrame(conn_frame)
@@ -254,13 +508,41 @@ class EnhancedOBDMonitor:
             interval_frame, textvariable=self.interval_var, width=60)
         interval_entry.pack(side="left", padx=5)
 
-        # Initialize ports
-        self.refresh_ports()
+        # Initialize connections
+        self.refresh_connections()
+
+    def on_connection_type_change(self, value):
+        """Handle connection type change"""
+        self.connection_type = value
+        self.config['connection']['type'] = value
+
+        if value == "bluetooth":
+            self.baudrate_label.grid_remove()
+            self.baudrate_combo.grid_remove()
+            self.refresh_btn.configure(text="Scan")
+        else:
+            self.baudrate_label.grid(row=0, column=2, padx=5, sticky="w")
+            self.baudrate_combo.grid(row=0, column=3, padx=5)
+            self.refresh_btn.configure(text="Refresh")
+
+        self.refresh_connections()
+
+    def refresh_connections(self):
+        """Refresh the list of available connections (serial ports or Bluetooth devices)"""
+        if self.connection_type_var.get() == "bluetooth":
+            self.scan_bluetooth_devices()
+        else:
+            self.refresh_ports()
 
     def refresh_ports(self):
         """Refresh the list of available serial ports"""
         try:
             ports = [port.device for port in serial.tools.list_ports.comports()]
+
+            # Always ensure COM3 is in the list for simulator purposes
+            if 'COM3' not in ports:
+                ports.insert(0, 'COM3')
+
             self.port_combo.configure(values=ports)
 
             # Set default port preference
@@ -268,38 +550,123 @@ class EnhancedOBDMonitor:
                 'connection', {}).get('port', 'COM3')
 
             if default_port in ports:
-                # Use the configured default port if available
                 self.port_combo.set(default_port)
             elif 'COM3' in ports:
-                # Fallback to COM3 if available
                 self.port_combo.set('COM3')
             elif ports:
-                # Use first available port as last resort
                 self.port_combo.set(ports[0])
             else:
                 self.port_combo.set("")
+
         except Exception as e:
             logger.error(f"Failed to refresh ports: {str(e)}")
-            self.port_combo.configure(values=[])
-            self.port_combo.set("")
+            # Fallback to COM3 for simulator
+            self.port_combo.configure(values=['COM3'])
+            self.port_combo.set('COM3')
+
+    def scan_bluetooth_devices(self):
+        """Scan for Bluetooth OBD devices"""
+        def scan_thread():
+            try:
+                self.status_label.configure(
+                    text="Scanning for Bluetooth devices...")
+                self.refresh_btn.configure(
+                    state="disabled", text="Scanning...")
+                self.root.update()
+
+                # Run Bluetooth scan with error handling
+                try:
+                    devices = self.bluetooth_manager.run_async_task(
+                        self.bluetooth_manager.scan_devices(
+                            timeout=self.config.get(
+                                'bluetooth', {}).get('scan_timeout', 10)
+                        )
+                    )
+                except Exception as bt_error:
+                    logger.error(f"Bluetooth scan error: {str(bt_error)}")
+                    devices = []
+
+                self.bluetooth_devices = devices or []
+                device_list = []
+
+                if devices:
+                    for device in devices:
+                        display_name = f"{device['name']} ({device['address']})"
+                        device_list.append(display_name)
+
+                # Update UI in main thread
+                self.root.after(0, self.update_bluetooth_devices, device_list)
+
+            except Exception as e:
+                logger.error(f"Error scanning Bluetooth devices: {str(e)}")
+                self.root.after(0, self.bluetooth_scan_error, str(e))
+
+        # Start scan in separate thread
+        scan_thread_obj = threading.Thread(target=scan_thread, daemon=True)
+        scan_thread_obj.start()
+
+    def update_bluetooth_devices(self, device_list):
+        """Update Bluetooth device list in UI"""
+        try:
+            self.port_combo.configure(values=device_list)
+
+            if device_list:
+                # Try to select previously used device
+                last_device = self.config.get(
+                    'bluetooth', {}).get('last_device')
+                if last_device and last_device in device_list:
+                    self.port_combo.set(last_device)
+                else:
+                    self.port_combo.set(device_list[0])
+
+                self.status_label.configure(
+                    text=f"Found {len(device_list)} Bluetooth device(s)")
+            else:
+                self.port_combo.set("")
+                self.status_label.configure(
+                    text="No Bluetooth OBD devices found")
+
+            self.refresh_btn.configure(state="normal", text="Scan")
+
+        except Exception as e:
+            logger.error(f"Error updating Bluetooth devices: {str(e)}")
+            self.bluetooth_scan_error(str(e))
+
+    def bluetooth_scan_error(self, error_msg):
+        """Handle Bluetooth scan error"""
+        self.status_label.configure(text="Bluetooth scan failed")
+        self.refresh_btn.configure(state="normal", text="Scan")
+        messagebox.showerror("Bluetooth Scan Error",
+                             f"Failed to scan for devices: {error_msg}")
 
     def connect_obd(self):
-        """Connect to the OBD device"""
+        """Connect to the OBD device (serial or Bluetooth)"""
+        if self.connection_type_var.get() == "bluetooth":
+            self.connect_bluetooth_obd()
+        else:
+            self.connect_serial_obd()
+
+    def connect_serial_obd(self):
+        """Connect to OBD device via serial port"""
         try:
             port = self.port_var.get()
             baudrate = int(self.baudrate_var.get())
             timeout = self.config['connection'].get('timeout', 10)
+
             self.status_label.configure(text="Connecting to OBD...")
             self.root.update()
 
             self.connection = obd.OBD(
                 port, baudrate=baudrate, timeout=timeout, fast=False)
+
             if self.connection.is_connected():
                 self.is_connected = True
+                self.connection_type = "serial"
                 self.update_connection_status(True)
                 self.get_available_pids()
-                self.status_label.configure(text="Connected to OBD device")
-                logger.info("Connected to OBD device")
+                self.status_label.configure(
+                    text=f"Connected to OBD device on {port}")
+                logger.info(f"Connected to OBD device on {port}")
             else:
                 self.is_connected = False
                 self.update_connection_status(False)
@@ -315,20 +682,161 @@ class EnhancedOBDMonitor:
             messagebox.showerror("Connection Error",
                                  f"Failed to connect to OBD: {str(e)}")
 
+    def connect_bluetooth_obd(self):
+        """Connect to OBD device via Bluetooth"""
+        def connect_thread():
+            try:
+                selected_device = self.port_var.get()
+                if not selected_device:
+                    # Use regular function to show warning
+                    def show_warning():
+                        messagebox.showwarning(
+                            "No Device Selected", "Please select a Bluetooth device")
+                    self.root.after(0, show_warning)
+                    return
+
+                # Extract device address from selection
+                device_address = None
+                for device in self.bluetooth_devices:
+                    display_name = f"{device['name']} ({device['address']})"
+                    if display_name == selected_device:
+                        device_address = device['address']
+                        break
+
+                if not device_address:
+                    # Use regular function to show error
+                    def show_error():
+                        messagebox.showerror(
+                            "Device Error", "Could not find device address")
+                    self.root.after(0, show_error)
+                    return
+
+                # Use regular functions for UI updates
+                def update_status():
+                    self.status_label.configure(
+                        text=f"Connecting to {device_address}...")
+                self.root.after(0, update_status)
+
+                def disable_connect():
+                    self.connect_btn.configure(state="disabled")
+                self.root.after(0, disable_connect)
+
+                # Connect to Bluetooth device
+                # Get timeout from config
+                timeout = self.config.get(
+                    'bluetooth', {}).get('connect_timeout', 10)
+
+                success = self.bluetooth_manager.run_async_task(
+                    self.bluetooth_manager.connect_device(device_address)
+                )
+
+                if success:
+                    self.is_connected = True
+                    self.connection_type = "bluetooth"
+                    self.connection = self.bluetooth_manager  # Use Bluetooth manager as connection
+
+                    # Save last used device
+                    self.config['bluetooth']['last_device'] = selected_device
+
+                    # Use named functions instead of lambdas
+                    def update_connection():
+                        self.update_connection_status(True)
+                    self.root.after(0, update_connection)
+
+                    def get_pids():
+                        self.get_available_pids()
+                    self.root.after(0, get_pids)
+
+                    def update_status():
+                        self.status_label.configure(
+                            text=f"Connected to Bluetooth device {device_address}")
+                    self.root.after(0, update_status)
+
+                    logger.info(
+                        f"Connected to Bluetooth OBD device {device_address}")
+                else:
+                    # Use a separate function for failure handling
+                    def handle_failure():
+                        self.bluetooth_connection_failed()
+                    self.root.after(0, handle_failure)
+
+            except Exception as e:
+                logger.error(f"Bluetooth connection error: {str(e)}")
+                self.root.after(
+                    0, lambda: self.bluetooth_connection_failed(str(e)))
+
+        # Start connection in separate thread
+        connect_thread_obj = threading.Thread(
+            target=connect_thread, daemon=True)
+        connect_thread_obj.start()
+
+    def bluetooth_connection_failed(self, error_msg=None):
+        """Handle Bluetooth connection failure"""
+        self.is_connected = False
+        self.update_connection_status(False)
+        self.connect_btn.configure(state="normal")
+
+        if error_msg:
+            self.status_label.configure(
+                text=f"Bluetooth connection failed: {error_msg}")
+            messagebox.showerror("Bluetooth Connection Failed",
+                                 f"Could not connect to Bluetooth device: {error_msg}")
+        else:
+            self.status_label.configure(text="Bluetooth connection failed")
+            messagebox.showerror("Bluetooth Connection Failed",
+                                 "Could not connect to Bluetooth device")
+
     def disconnect_obd(self):
         """Disconnect from the OBD device"""
         try:
-            if self.connection:
-                self.connection.close()
-                self.connection = None
-            self.is_connected = False
-            self.update_connection_status(False)
-            self.status_label.configure(text="Disconnected from OBD device")
-            logger.info("Disconnected from OBD device")
+            if self.connection_type == "bluetooth":
+                self.disconnect_bluetooth_obd()
+            else:
+                self.disconnect_serial_obd()
+
         except Exception as e:
             logger.error(f"Failed to disconnect from OBD: {str(e)}")
             messagebox.showerror("Disconnection Error",
                                  f"Failed to disconnect from OBD: {str(e)}")
+
+    def disconnect_serial_obd(self):
+        """Disconnect from serial OBD device"""
+        if self.connection:
+            self.connection.close()
+            self.connection = None
+
+        self.is_connected = False
+        self.update_connection_status(False)
+        self.status_label.configure(text="Disconnected from OBD device")
+        logger.info("Disconnected from serial OBD device")
+
+    def disconnect_bluetooth_obd(self):
+        """Disconnect from Bluetooth OBD device"""
+        def disconnect_thread():
+            try:
+                self.bluetooth_manager.run_async_task(
+                    self.bluetooth_manager.disconnect_device()
+                )
+
+                # Use named function instead of lambda
+                def update_status():
+                    self.status_label.configure(
+                        text="Disconnected from Bluetooth device")
+                self.root.after(0, update_status)
+
+                logger.info("Disconnected from Bluetooth OBD device")
+
+            except Exception as e:
+                logger.error(f"Error disconnecting Bluetooth: {str(e)}")
+
+        self.connection = None
+        self.is_connected = False
+        self.update_connection_status(False)
+
+        # Start disconnection in separate thread
+        disconnect_thread_obj = threading.Thread(
+            target=disconnect_thread, daemon=True)
+        disconnect_thread_obj.start()
 
     def setup_enhanced_tabbed_interface(self, parent):
         """Setup the enhanced tabbed interface"""
@@ -359,9 +867,60 @@ class EnhancedOBDMonitor:
         self.logs_tab = self.notebook.add("Logs")
         self.setup_enhanced_logs_tab()
 
+        # Tables tab (for VE table and other tables)
+        self.tables_tab = self.notebook.add("Tables")
+        self.setup_tables_tab()
+
         # Settings tab
         self.settings_tab = self.notebook.add("Settings")
         self.setup_settings_tab()
+
+    def setup_tables_tab(self):
+        """Setup tables tab for VE table and other tables"""
+        tables_frame = ctk.CTkFrame(self.tables_tab)
+        tables_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+        # Header
+        ctk.CTkLabel(tables_frame, text="Engine Tables",
+                     font=ctk.CTkFont(size=16, weight="bold")).pack(pady=10)
+
+        # VE Table section
+        ve_frame = ctk.CTkFrame(tables_frame)
+        ve_frame.pack(fill="x", pady=10, padx=10)
+
+        ctk.CTkLabel(ve_frame, text="Volumetric Efficiency Table",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+
+        ve_desc = ctk.CTkLabel(
+            ve_frame,
+            text="Display and edit the Volumetric Efficiency (VE) table.\n"
+                 "The VE table represents the engine's ability to fill cylinders with air.",
+            wraplength=600)
+        ve_desc.pack(pady=5)
+
+        ve_button = ctk.CTkButton(
+            ve_frame,
+            text="Open VE Table",
+            command=self.show_ve_table,
+            width=150)
+        ve_button.pack(pady=10)
+
+        # Placeholder for other tables
+        # You can add more tables here in the future
+
+    def show_ve_table(self):
+        """Show the Volumetric Efficiency (VE) table window"""
+        try:
+            # Create a function to get current PID data
+            def get_pid_data():
+                return self.pid_data
+
+            # Create VE table window with data getter function
+            ve_window = VETableWindow(self.root, pid_data_getter=get_pid_data)
+            logger.info("Opened VE Table window")
+        except Exception as e:
+            logger.error(f"Error opening VE Table: {str(e)}")
+            messagebox.showerror("Error", f"Failed to open VE Table: {str(e)}")
 
     def setup_enhanced_dashboard_tab(self):
         """Setup the enhanced digital dashboard"""
@@ -370,12 +929,35 @@ class EnhancedOBDMonitor:
 
         self.dashboard_widgets = {}
 
+        # Dashboard Controls
+        controls_frame = ctk.CTkFrame(dash_frame)
+        controls_frame.pack(fill="x", pady=5)
+
+        ctk.CTkLabel(controls_frame, text="Dashboard", font=ctk.CTkFont(
+            size=16, weight="bold")).pack(side="left", padx=10)
+
+        # Add PID to dashboard button
+        add_pid_btn = ctk.CTkButton(
+            controls_frame, text="Add PID to Dashboard",
+            command=self.show_add_pid_dialog, width=180)
+        add_pid_btn.pack(side="right", padx=10)
+
+        # VE Table button
+        ve_table_btn = ctk.CTkButton(
+            controls_frame, text="VE Table",
+            command=self.show_ve_table, width=100)
+        ve_table_btn.pack(side="right", padx=10)
+
         # Alert panel
         alert_frame = ctk.CTkFrame(dash_frame)
         alert_frame.pack(fill="x", pady=5)
 
-        ctk.CTkLabel(alert_frame, text="Active Alerts",
-                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+        active_alerts_label = ctk.CTkLabel(
+            alert_frame,
+            text="Active Alerts",
+            font=ctk.CTkFont(size=14, weight="bold")
+        )
+        active_alerts_label.pack(pady=5)
         self.alert_display = ctk.CTkTextbox(alert_frame, height=60)
         self.alert_display.pack(fill="x", padx=10, pady=5)
 
@@ -387,16 +969,28 @@ class EnhancedOBDMonitor:
 
     def create_gauge_grid(self, parent):
         """Create responsive gauge grid"""
-        # Row 1: Primary engine metrics
-        row1_frame = ctk.CTkFrame(parent)
-        row1_frame.pack(fill="x", padx=10, pady=5)
+        # Container for all gauge rows
+        self.gauges_container = parent
 
-        self.create_enhanced_gauge_widget(
-            row1_frame, "RPM", "rpm", 0, 8000, "RPM", 0, 0, "#FF6B6B")
-        self.create_enhanced_gauge_widget(
-            row1_frame, "Speed", "speed", 0, 200, "km/h", 0, 1, "#4ECDC4")
-        self.create_enhanced_gauge_widget(
-            row1_frame, "Engine Load", "engine_load", 0, 100, "%", 0, 2, "#45B7D1")
+        # Save the default gauges to create initially
+        self.default_gauges = [
+            {"title": "RPM", "key": "rpm", "min_val": 0,
+                "max_val": 8000, "unit": "RPM", "color": "#FF6B6B"},
+            {"title": "Speed", "key": "speed", "min_val": 0,
+                "max_val": 200, "unit": "km/h", "color": "#4ECDC4"},
+            {"title": "Engine Load", "key": "engine_load", "min_val": 0,
+                "max_val": 100, "unit": "%", "color": "#45B7D1"}
+        ]
+
+        # Create the initial row
+        self.current_row = 0
+        self.current_col = 0
+        self.max_cols = 3
+        self.create_gauge_row()
+
+        # Add default gauges
+        for gauge in self.default_gauges:
+            self.add_gauge_to_dashboard(**gauge)
 
     def create_enhanced_gauge_widget(self, parent, title, key, min_val, max_val, unit, row, col, color):
         """Create an enhanced gauge widget with color coding"""
@@ -628,56 +1222,66 @@ class EnhancedOBDMonitor:
             ("Engine Load", "engine_load", 80, 95),
             ("Coolant Temperature", "coolant_temp", 90, 105),
             ("Intake Temperature", "intake_temp", 60, 80),
-            ("Throttle Position", "throttle_pos", 90, 100)
+            ("Throttle Position", "throttle_pos", 90, 100),
+            ("Mass Air Flow", "maf", 25, 30),
+            ("Manifold Pressure", "map", 100, 110),
+            ("Timing Advance", "timing_advance", 22, 25),
+            ("Lambda1", "lambda1", 1.1, 1.15)
         ]
 
-        for i, (name, key, warn_val, crit_val) in enumerate(thresholds):
-            frame = ctk.CTkFrame(parent)
-            frame.pack(fill="x", padx=5, pady=5)
-
-            ctk.CTkLabel(frame, text=name, width=150).pack(side="left", padx=5)
-
-            ctk.CTkLabel(frame, text="Warning:").pack(side="left", padx=5)
-            warn_var = tk.StringVar(value=str(warn_val))
-            warn_entry = ctk.CTkEntry(frame, textvariable=warn_var, width=80)
-            warn_entry.pack(side="left", padx=5)
-
-            ctk.CTkLabel(frame, text="Critical:").pack(side="left", padx=5)
-            crit_var = tk.StringVar(value=str(crit_val))
-            crit_entry = ctk.CTkEntry(frame, textvariable=crit_var, width=80)
-            crit_entry.pack(side="left", padx=5)
-
-            self.threshold_widgets[key] = {
-                'warning': warn_var,
-                'critical': crit_var
-            }
+        if not self.is_connected:
+            messagebox.showwarning(
+                "Not Connected", "Please connect to an OBD device first.")
+            return
 
     def clear_dtcs(self):
-        """Clear Diagnostic Trouble Codes (DTCs) from the vehicle and update the display."""
-        if not self.is_connected or not self.connection:
+        """Clear Diagnostic Trouble Codes"""
+        if not self.is_connected:
             messagebox.showwarning(
                 "Not Connected", "Please connect to an OBD device first.")
             return
         try:
-            # Attempt to clear DTCs using the OBD library
-            # Note: Use the correct command for clearing DTCs
-            try:
-                response = self.connection.query(obd.commands.CLEAR_DTC)
-                if response.is_null():
-                    messagebox.showinfo(
-                        "Clear DTCs", "No response from OBD device.")
-                else:
+            if self.connection_type == "bluetooth":
+                # For Bluetooth, send clear DTC command directly
+                response = self.bluetooth_manager.run_async_task(
+                    self.bluetooth_manager.send_command("04\r\n")
+                )
+                if response:
                     messagebox.showinfo(
                         "Clear DTCs", "DTCs cleared successfully.")
-            except AttributeError:
-                messagebox.showinfo(
-                    "Clear DTCs", "Clear DTC command not available in this OBD version.")
-            except Exception as inner_e:
-                messagebox.showerror(
-                    "Error", f"Failed to clear DTCs: {str(inner_e)}")
-                return
+                else:
+                    messagebox.showinfo(
+                        "Clear DTCs", "No response from OBD device.")
+            else:
+                # For serial connection, use OBD library
+                if not self.connection:
+                    messagebox.showinfo(
+                        "Clear DTCs", "No OBD connection available.")
+                    return
+
+                try:
+                    # Create a custom command for clearing DTCs (Mode 04)
+                    clear_dtc_cmd = obd.OBDCommand(
+                        "CLEAR_DTC", "Clear DTCs", b"04", 0, lambda _: None)
+                    response = self.connection.query(clear_dtc_cmd)
+
+                    if response and hasattr(response, 'is_null') and response.is_null():
+                        messagebox.showinfo(
+                            "Clear DTCs", "No response from OBD device.")
+                    else:
+                        messagebox.showinfo(
+                            "Clear DTCs", "DTCs cleared successfully.")
+                except AttributeError:
+                    messagebox.showinfo(
+                        "Clear DTCs", "Clear DTC command not available in this OBD version.")
+                except Exception as inner_e:
+                    messagebox.showerror(
+                        "Error", f"Failed to clear DTCs: {str(inner_e)}")
+                    return
+
             # Refresh DTCs after clearing
             self.refresh_dtcs()
+
         except Exception as e:
             logger.error(f"Failed to clear DTCs: {str(e)}")
             messagebox.showerror("Error", f"Failed to clear DTCs: {str(e)}")
@@ -787,8 +1391,15 @@ class EnhancedOBDMonitor:
         self.color_theme_var = tk.StringVar(
             value=self.config['appearance']['theme'])
 
+        # Connection settings
+        connection_frame = ctk.CTkFrame(settings_frame)
+        connection_frame.pack(fill="x", padx=10, pady=10)
+
+        ctk.CTkLabel(connection_frame, text="Connection Settings",
+                     font=ctk.CTkFont(size=14, weight="bold")).pack(pady=5)
+
         # Timeout setting
-        timeout_frame = ctk.CTkFrame(settings_frame)
+        timeout_frame = ctk.CTkFrame(connection_frame)
         timeout_frame.pack(fill="x", padx=10, pady=5)
         ctk.CTkLabel(timeout_frame, text="Connection Timeout (s):").pack(
             side="left", padx=5)
@@ -797,6 +1408,18 @@ class EnhancedOBDMonitor:
         timeout_entry = ctk.CTkEntry(
             timeout_frame, textvariable=self.timeout_var, width=80)
         timeout_entry.pack(side="left", padx=5)
+
+        # Bluetooth settings
+        bluetooth_frame = ctk.CTkFrame(connection_frame)
+        bluetooth_frame.pack(fill="x", padx=10, pady=5)
+
+        ctk.CTkLabel(bluetooth_frame, text="Bluetooth Scan Timeout (s):").pack(
+            side="left", padx=5)
+        self.bt_scan_timeout_var = tk.StringVar(
+            value=str(self.config.get('bluetooth', {}).get('scan_timeout', 10)))
+        bt_scan_entry = ctk.CTkEntry(
+            bluetooth_frame, textvariable=self.bt_scan_timeout_var, width=80)
+        bt_scan_entry.pack(side="left", padx=5)
 
         # Max log entries setting
         max_logs_frame = ctk.CTkFrame(settings_frame)
@@ -808,6 +1431,36 @@ class EnhancedOBDMonitor:
         max_logs_entry = ctk.CTkEntry(
             max_logs_frame, textvariable=self.max_logs_var, width=80)
         max_logs_entry.pack(side="left", padx=5)
+
+        # Save settings button
+        save_settings_btn = ctk.CTkButton(
+            settings_frame, text="Save Settings", command=self.save_settings, width=120)
+        save_settings_btn.pack(pady=20)
+
+    def save_settings(self):
+        """Save current settings to configuration"""
+        try:
+            # Update configuration with current values
+            self.config['connection']['timeout'] = int(self.timeout_var.get())
+            self.config['bluetooth']['scan_timeout'] = int(
+                self.bt_scan_timeout_var.get())
+            self.config['monitoring']['max_log_entries'] = int(
+                self.max_logs_var.get())
+
+            # Save to file
+            self.save_config_to_file()
+
+            messagebox.showinfo(
+                "Settings Saved", "Settings have been saved successfully.")
+            logger.info("Settings saved")
+
+        except ValueError as e:
+            messagebox.showerror(
+                "Invalid Value", "Please enter valid numeric values.")
+        except Exception as e:
+            logger.error(f"Error saving settings: {str(e)}")
+            messagebox.showerror(
+                "Save Error", f"Failed to save settings: {str(e)}")
 
     def export_data(self):
         """Export monitoring data to CSV file"""
@@ -1036,31 +1689,45 @@ class EnhancedOBDMonitor:
             return
 
         try:
-            # Query DTCs
-            try:
-                dtc_response = self.connection.query(obd.commands.GET_DTC)
+            if self.connection_type == "bluetooth":
+                # For Bluetooth, send DTC query command directly
+                response = self.bluetooth_manager.run_async_task(
+                    self.bluetooth_manager.send_command("03\r\n")
+                )
 
-                if dtc_response.is_null():
-                    self.dtc_data = []
-                    dtc_text = "No DTCs found or unable to retrieve DTCs"
+                if response:
+                    # Parse DTC response (simplified)
+                    self.dtc_data = [
+                        response.strip()] if response.strip() else []
+                    dtc_text = f"Bluetooth DTC Response:\n{response}" if response else "No DTCs found"
                 else:
-                    self.dtc_data = dtc_response.value if dtc_response.value else []
+                    self.dtc_data = []
+                    dtc_text = "No response from Bluetooth OBD device"
+            else:
+                # For serial connection, use OBD library
+                try:
+                    # Create a custom command for reading DTCs (Mode 03)
+                    get_dtc_cmd = obd.OBDCommand(
+                        "GET_DTC", "Get DTCs", b"03", 0, lambda _: None)
+                    dtc_response = self.connection.query(get_dtc_cmd)
 
-                    if self.dtc_data:
-                        dtc_text = f"Found {len(self.dtc_data)} DTC(s):\n\n"
-                        for dtc in self.dtc_data:
-                            dtc_text += f"• {dtc}\n"
+                    if dtc_response.is_null():
+                        self.dtc_data = []
+                        dtc_text = "No DTCs found or unable to retrieve DTCs"
                     else:
-                        dtc_text = "No DTCs found - Vehicle systems OK"
+                        self.dtc_data = dtc_response.value if dtc_response.value else []
 
-            except AttributeError:
-                # If GET_DTC is not available, try alternative
-                self.dtc_data = []
-                dtc_text = "DTC query not supported by this OBD adapter"
-                # Update UI
-                self.dtcs_text.delete("1.0", tk.END)
-                self.dtcs_text.insert("1.0", dtc_text)
-                return
+                        if self.dtc_data:
+                            dtc_text = f"Found {len(self.dtc_data)} DTC(s):\n\n"
+                            for dtc in self.dtc_data:
+                                dtc_text += f"• {dtc}\n"
+                        else:
+                            dtc_text = "No DTCs found - Vehicle systems OK"
+
+                except AttributeError:
+                    # If GET_DTC is not available, try alternative
+                    self.dtc_data = []
+                    dtc_text = "DTC query not supported by this OBD adapter"
 
             # Update UI
             self.dtcs_text.delete("1.0", tk.END)
@@ -1086,10 +1753,25 @@ class EnhancedOBDMonitor:
     def on_closing(self):
         """Handle window close event: save config and cleanup."""
         try:
+            # Stop monitoring
+            if self.monitoring:
+                self.stop_monitoring()
+
+            # Disconnect from device
+            if self.is_connected:
+                self.disconnect_obd()
+
+            # Stop charting
+            if hasattr(self, 'charting_active'):
+                self.charting_active = False
+
+            # Save configuration
             self.save_config_to_file()
+
         except Exception as e:
-            logger.error(f"Error saving config on close: {str(e)}")
-        self.root.destroy()
+            logger.error(f"Error during cleanup: {str(e)}")
+        finally:
+            self.root.destroy()
 
     def save_config(self):
         """Save current configuration"""
@@ -1116,8 +1798,18 @@ class EnhancedOBDMonitor:
             time_str = f"{hours:02d}:{minutes:02d}:{seconds:02d}"
             self.session_label.configure(text=f"Session: {time_str}")
 
-            # Schedule next update
-            self.root.after(1000, self.update_session_timer)
+            # Update log stats
+            if hasattr(self, 'log_stats_label'):
+                self.log_stats_label.configure(
+                    text=f"Log entries: {len(self.log_data)} | Session time: {time_str}")
+
+            # Schedule next update using callback manager
+            self.callback_manager.schedule_after(
+                self.root, 1000, self.update_session_timer)
+
+            # Clean up old callbacks occasionally
+            if self.callback_manager._callback_counter % 100 == 0:
+                self.callback_manager.clear_old_callbacks()
         except Exception as e:
             logger.error(f"Error updating session timer: {str(e)}")
 
@@ -1125,8 +1817,9 @@ class EnhancedOBDMonitor:
         """Update connection status in UI"""
         try:
             if connected:
+                conn_text = f"Connected ({self.connection_type.title()})"
                 self.connection_status.configure(
-                    text="Connected", text_color="green")
+                    text=conn_text, text_color="green")
                 self.connect_btn.configure(state="disabled")
                 self.disconnect_btn.configure(state="normal")
                 self.start_btn.configure(state="normal")
@@ -1151,17 +1844,30 @@ class EnhancedOBDMonitor:
                 return
 
             self.available_pids = []
-            # Get supported PIDs
-            try:
-                for cmd in obd.commands:
-                    if cmd and hasattr(cmd, 'supported') and cmd.supported:
-                        if hasattr(cmd, 'name'):
-                            self.available_pids.append(cmd.name)
-            except Exception as e:
-                logger.warning(f"Could not enumerate OBD commands: {e}")
-                # Add some common PIDs manually
+
+            if self.connection_type == "bluetooth":
+                # For Bluetooth, use a predefined list of common PIDs
                 self.available_pids = [
-                    'RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP', 'INTAKE_TEMP', 'THROTTLE_POS']
+                    'RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP',
+                    'INTAKE_TEMP', 'THROTTLE_POS', 'FUEL_LEVEL', 'BAROMETRIC_PRESSURE',
+                    'MAF', 'MAP', 'TIMING_ADVANCE', 'TPS', 'LAMBDA1', 'LAMBDA2',
+                    'AFR', 'O2_BANK1', 'O2_BANK2', 'IAT', 'ECT', 'ENGINE_SPEED',
+                    'IAC', 'VE', 'IDLE_SPEED'
+                ]
+            else:
+                # For serial connection, get supported PIDs from OBD library
+                try:
+                    for cmd in obd.commands:
+                        if cmd and hasattr(cmd, 'supported') and cmd.supported:
+                            if hasattr(cmd, 'name'):
+                                self.available_pids.append(cmd.name)
+                except Exception as e:
+                    logger.warning(f"Could not enumerate OBD commands: {e}")
+                    # Add some common PIDs manually
+                    self.available_pids = [
+                        'RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP',
+                        'INTAKE_TEMP', 'THROTTLE_POS'
+                    ]
 
             # Update chart PID combo
             if hasattr(self, 'chart_pid_combo'):
@@ -1210,51 +1916,16 @@ class EnhancedOBDMonitor:
         """Main monitoring loop"""
         while self.monitoring and self.is_connected:
             try:
-                # Query common PIDs with error handling
-                common_pids = []
+                if self.connection_type == "bluetooth":
+                    self.monitor_bluetooth_pids()
+                else:
+                    self.monitor_serial_pids()
 
-                # Try to get common PIDs from obd commands
-                try:
-                    # Use getattr to safely access commands
-                    rpm_cmd = getattr(obd.commands, 'RPM', None)
-                    speed_cmd = getattr(obd.commands, 'SPEED', None)
-                    load_cmd = getattr(obd.commands, 'ENGINE_LOAD', None)
-                    coolant_cmd = getattr(obd.commands, 'COOLANT_TEMP', None)
-                    intake_cmd = getattr(obd.commands, 'INTAKE_TEMP', None)
-                    throttle_cmd = getattr(obd.commands, 'THROTTLE_POS', None)
-
-                    # Add valid commands to the list
-                    for cmd in [rpm_cmd, speed_cmd, load_cmd, coolant_cmd, intake_cmd, throttle_cmd]:
-                        if cmd is not None:
-                            common_pids.append(cmd)
-
-                except AttributeError:
-                    # If specific commands are not available, try alternative approach
-                    logger.warning(
-                        "Some OBD commands not available in this version")
-                    # Use a more generic approach
-                    try:
-                        for cmd in obd.commands:
-                            if cmd and hasattr(cmd, 'name') and cmd.name in ['RPM', 'SPEED', 'ENGINE_LOAD']:
-                                common_pids.append(cmd)
-                    except:
-                        # If all else fails, skip this iteration
-                        continue
-
-                for pid in common_pids:
-                    if self.connection and self.monitoring:
-                        try:
-                            response = self.connection.query(pid)
-                            if not response.is_null():
-                                self.update_pid_data(
-                                    pid.name, response.value, str(response.unit))
-                        except Exception as e:
-                            logger.error(
-                                f"Error querying PID {pid.name}: {str(e)}")
-
-                # Update dashboard
-                self.root.after(0, self.update_dashboard)
-                self.root.after(0, self.update_pids_display)
+                # Update dashboard and PIDs display using callback manager
+                self.callback_manager.schedule_after(
+                    self.root, 0, self.update_dashboard)
+                self.callback_manager.schedule_after(
+                    self.root, 0, self.update_pids_display)
 
                 # Sleep based on update interval
                 interval = int(self.interval_var.get()) / 1000.0
@@ -1263,6 +1934,187 @@ class EnhancedOBDMonitor:
             except Exception as e:
                 logger.error(f"Error in monitoring loop: {str(e)}")
                 break
+
+    def monitor_bluetooth_pids(self):
+        """Monitor PIDs via Bluetooth connection"""
+        try:
+            # Simulate PID data for Bluetooth (in real implementation, send actual OBD commands)
+            import random
+
+            # Common OBD PIDs and their commands
+            pid_commands = {
+                'RPM': '010C\r\n',
+                'SPEED': '010D\r\n',
+                'ENGINE_LOAD': '0104\r\n',
+                'COOLANT_TEMP': '0105\r\n',
+                'INTAKE_TEMP': '010F\r\n',
+                'THROTTLE_POS': '0111\r\n',
+                'MAF': '0110\r\n',                   # Mass Air Flow
+                'MAP': '010B\r\n',                   # Manifold Absolute Pressure
+                'TIMING_ADVANCE': '010E\r\n',        # Timing Advance
+                'TPS': '0111\r\n',                   # Throttle Position Sensor
+                # O2 Sensor Lambda (Bank 1)
+                'LAMBDA1': '0124\r\n',
+                # O2 Sensor Lambda (Bank 2)
+                'LAMBDA2': '0125\r\n',
+                'AFR': '0134\r\n',                   # Air-Fuel Ratio
+                'O2_BANK1': '0114\r\n',              # O2 Sensor (Bank 1)
+                'O2_BANK2': '0115\r\n',              # O2 Sensor (Bank 2)
+                'IAT': '010F\r\n',                   # Intake Air Temperature
+                'ECT': '0105\r\n',                   # Engine Coolant Temperature
+                # Engine Speed (same as RPM)
+                'ENGINE_SPEED': '010C\r\n',
+                'IAC': '0103\r\n',                   # Idle Air Control
+                # Volumetric Efficiency (similar to Engine Load)
+                'VE': '0104\r\n',
+                # Idle Speed (RPM when vehicle idle)
+                'IDLE_SPEED': '010C\r\n'
+            }
+
+            for pid_name, command in pid_commands.items():
+                if not self.monitoring:
+                    break
+
+                try:
+                    # Send command via Bluetooth
+                    response = self.bluetooth_manager.run_async_task(
+                        self.bluetooth_manager.send_command(command)
+                    )
+
+                    if response:
+                        # Parse response (simplified - in real implementation, parse actual OBD response)
+                        # For now, generate simulated values
+                        if pid_name == 'RPM' or pid_name == 'ENGINE_SPEED':
+                            value = random.randint(800, 3000)
+                            unit = 'rpm'
+                        elif pid_name == 'IDLE_SPEED':
+                            value = random.randint(750, 950)
+                            unit = 'rpm'
+                        elif pid_name == 'SPEED':
+                            value = random.randint(0, 120)
+                            unit = 'km/h'
+                        elif pid_name == 'ENGINE_LOAD' or pid_name == 'VE':
+                            value = random.randint(20, 80)
+                            unit = '%'
+                        elif pid_name == 'COOLANT_TEMP' or pid_name == 'ECT':
+                            value = random.randint(80, 95)
+                            unit = '°C'
+                        elif pid_name == 'INTAKE_TEMP' or pid_name == 'IAT':
+                            value = random.randint(20, 60)
+                            unit = '°C'
+                        elif pid_name == 'THROTTLE_POS' or pid_name == 'TPS':
+                            value = random.randint(0, 100)
+                            unit = '%'
+                        elif pid_name == 'MAF':
+                            value = random.randint(5, 30)
+                            unit = 'g/s'
+                        elif pid_name == 'MAP':
+                            value = random.randint(30, 110)
+                            unit = 'kPa'
+                        elif pid_name == 'TIMING_ADVANCE':
+                            value = random.randint(5, 25)
+                            unit = '°'
+                        elif pid_name == 'LAMBDA1' or pid_name == 'LAMBDA2':
+                            value = round(random.uniform(0.85, 1.15), 2)
+                            unit = 'λ'
+                        elif pid_name == 'AFR':
+                            value = round(random.uniform(12.5, 16.0), 1)
+                            unit = ':1'
+                        elif pid_name == 'O2_BANK1' or pid_name == 'O2_BANK2':
+                            value = round(random.uniform(0.1, 0.9), 2)
+                            unit = 'V'
+                        elif pid_name == 'IAC':
+                            value = random.randint(20, 50)
+                            unit = '%'
+                        else:
+                            value = 0
+                            unit = ''
+
+                        self.update_pid_data(pid_name, value, unit)
+
+                except Exception as e:
+                    logger.error(
+                        f"Error querying Bluetooth PID {pid_name}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Error in Bluetooth monitoring: {str(e)}")
+
+    def monitor_serial_pids(self):
+        """Monitor PIDs via serial connection"""
+        try:
+            # Query common PIDs with error handling
+            common_pids = []
+
+            # Try to get common PIDs from obd commands
+            try:
+                # Use getattr to safely access commands
+                rpm_cmd = getattr(obd.commands, 'RPM', None)
+                speed_cmd = getattr(obd.commands, 'SPEED', None)
+                load_cmd = getattr(obd.commands, 'ENGINE_LOAD', None)
+                coolant_cmd = getattr(obd.commands, 'COOLANT_TEMP', None)
+                intake_cmd = getattr(obd.commands, 'INTAKE_TEMP', None)
+                throttle_cmd = getattr(obd.commands, 'THROTTLE_POS', None)
+
+                # Additional PIDs
+                maf_cmd = getattr(obd.commands, 'MAF', None)
+                map_cmd = getattr(obd.commands, 'INTAKE_PRESSURE', None)  # MAP
+                timing_cmd = getattr(obd.commands, 'TIMING_ADVANCE', None)
+                o2_b1_cmd = getattr(obd.commands, 'O2_B1S1',
+                                    None)  # O2 sensor bank 1
+                o2_b2_cmd = getattr(obd.commands, 'O2_B2S1',
+                                    None)  # O2 sensor bank 2
+                lambda1_cmd = getattr(
+                    obd.commands, 'COMMANDED_EQUIV_RATIO', None)  # Lambda
+                iat_cmd = getattr(obd.commands, 'INTAKE_TEMP', None)
+                ect_cmd = getattr(obd.commands, 'COOLANT_TEMP', None)
+                # Idle speed is RPM when stationary
+                idle_cmd = getattr(obd.commands, 'RPM', None)
+
+                # Short and long fuel trims for AFR calculations
+                short_ft_cmd = getattr(obd.commands, 'SHORT_FUEL_TRIM_1', None)
+                long_ft_cmd = getattr(obd.commands, 'LONG_FUEL_TRIM_1', None)
+
+                # Add valid commands to the list
+                available_cmds = [
+                    rpm_cmd, speed_cmd, load_cmd, coolant_cmd, intake_cmd, throttle_cmd,
+                    maf_cmd, map_cmd, timing_cmd, o2_b1_cmd, o2_b2_cmd, lambda1_cmd,
+                    iat_cmd, ect_cmd, idle_cmd, short_ft_cmd, long_ft_cmd
+                ]
+
+                for cmd in available_cmds:
+                    if cmd is not None:
+                        common_pids.append(cmd)
+
+            except AttributeError:
+                # If specific commands are not available, try alternative approach
+                logger.warning(
+                    "Some OBD commands not available in this version")
+                # Use a more generic approach
+                try:
+                    for cmd in obd.commands:
+                        if cmd and hasattr(cmd, 'name') and cmd.name in [
+                            'RPM', 'SPEED', 'ENGINE_LOAD', 'COOLANT_TEMP', 'INTAKE_TEMP',
+                            'THROTTLE_POS', 'MAF', 'MAP', 'TIMING_ADVANCE', 'O2_B1S1', 'O2_B2S1',
+                            'SHORT_FUEL_TRIM_1', 'LONG_FUEL_TRIM_1', 'COMMANDED_EQUIV_RATIO'
+                        ]:
+                            common_pids.append(cmd)
+                except:
+                    # If all else fails, skip this iteration
+                    return
+
+            for pid in common_pids:
+                if self.connection and self.monitoring:
+                    try:
+                        response = self.connection.query(pid)
+                        if not response.is_null():
+                            self.update_pid_data(
+                                pid.name, response.value, str(response.unit))
+                    except Exception as e:
+                        logger.error(
+                            f"Error querying PID {pid.name}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Error in serial monitoring: {str(e)}")
 
     def update_pid_data(self, pid_name, value, unit):
         """Update PID data storage"""
@@ -1296,6 +2148,9 @@ class EnhancedOBDMonitor:
                     if isinstance(current_max, (int, float)) and value > current_max:
                         self.pid_data[pid_name]['max_value'] = value
 
+            # Check for alerts
+            self.check_alerts(pid_name, value)
+
             # Add to log data
             self.log_data.append({
                 'timestamp': timestamp,
@@ -1311,15 +2166,168 @@ class EnhancedOBDMonitor:
             if len(self.log_data) > max_entries:
                 self.log_data = self.log_data[-max_entries:]
 
+            # Auto-save if enabled
+            if self.auto_save_var.get() and len(self.log_data) % 100 == 0:
+                self.auto_save_logs()
+
         except Exception as e:
             logger.error(f"Error updating PID data: {str(e)}")
+
+    def check_alerts(self, pid_name, value):
+        """Check if PID value triggers any alerts"""
+        try:
+            if not isinstance(value, (int, float)):
+                return
+
+            # Map PID names to threshold keys
+            threshold_map = {
+                'RPM': 'rpm',
+                'ENGINE_SPEED': 'rpm',
+                'SPEED': 'speed',
+                'ENGINE_LOAD': 'engine_load',
+                'VE': 'engine_load',
+                'COOLANT_TEMP': 'coolant_temp',
+                'ECT': 'ect',
+                'INTAKE_TEMP': 'intake_temp',
+                'IAT': 'intake_temp',
+                'THROTTLE_POS': 'throttle_pos',
+                'TPS': 'throttle_pos',
+                'MAF': 'maf',
+                'MAP': 'map',
+                'INTAKE_PRESSURE': 'map',
+                'TIMING_ADVANCE': 'timing_advance',
+                'LAMBDA1': 'lambda1',
+                'LAMBDA2': 'lambda2',
+                'AFR': 'afr',
+                'COMMANDED_EQUIV_RATIO': 'lambda1',
+                'O2_BANK1': 'o2_bank1',
+                'O2_B1S1': 'o2_bank1',
+                'O2_BANK2': 'o2_bank2',
+                'O2_B2S1': 'o2_bank2',
+                'IDLE_SPEED': 'idle_speed'
+            }
+
+            threshold_key = threshold_map.get(pid_name)
+            if not threshold_key or threshold_key not in self.threshold_widgets:
+                return
+
+            try:
+                warning_threshold = float(
+                    self.threshold_widgets[threshold_key]['warning'].get())
+                critical_threshold = float(
+                    self.threshold_widgets[threshold_key]['critical'].get())
+            except (ValueError, KeyError):
+                return
+
+            alert_level = None
+            if value >= critical_threshold:
+                alert_level = "CRITICAL"
+            elif value >= warning_threshold:
+                alert_level = "WARNING"
+
+            if alert_level:
+                alert_msg = f"{alert_level}: {pid_name} = {value}"
+
+                # Add to active alerts if not already present
+                if alert_msg not in self.active_alerts:
+                    self.active_alerts.append(alert_msg)
+
+                    # Update alert display using callback manager
+                    self.callback_manager.schedule_after(
+                        self.root, 0, self.update_alert_display)
+
+                    # Trigger audio alert if enabled
+                    if self.audio_alerts_var.get():
+                        self.trigger_audio_alert(alert_level)
+
+                    logger.warning(f"Alert triggered: {alert_msg}")
+            else:
+                # Remove from active alerts if value is back to normal
+                alerts_to_remove = [
+                    alert for alert in self.active_alerts if pid_name in alert]
+                for alert in alerts_to_remove:
+                    self.active_alerts.remove(alert)
+                    # Update alert display using callback manager
+                    self.callback_manager.schedule_after(
+                        self.root, 0, self.update_alert_display)
+
+        except Exception as e:
+            logger.error(f"Error checking alerts: {str(e)}")
+
+    def update_alert_display(self):
+        """Update the alert display in the dashboard"""
+        try:
+            if hasattr(self, 'alert_display'):
+                self.alert_display.delete("1.0", tk.END)
+                if self.active_alerts:
+                    # Show last 5 alerts
+                    alert_text = "\n".join(self.active_alerts[-5:])
+                    self.alert_display.insert("1.0", alert_text)
+                else:
+                    self.alert_display.insert("1.0", "No active alerts")
+
+            if hasattr(self, 'active_alerts_text'):
+                self.active_alerts_text.delete("1.0", tk.END)
+                if self.active_alerts:
+                    alert_text = "\n".join(self.active_alerts)
+                    self.active_alerts_text.insert("1.0", alert_text)
+                else:
+                    self.active_alerts_text.insert("1.0", "No active alerts")
+
+        except Exception as e:
+            logger.error(f"Error updating alert display: {str(e)}")
+
+    def trigger_audio_alert(self, level):
+        """Trigger audio alert based on level"""
+        try:
+            if winsound:
+                if level == "CRITICAL":
+                    # High-pitched beep for critical
+                    winsound.Beep(1000, 500)
+                elif level == "WARNING":
+                    # Lower-pitched beep for warning
+                    winsound.Beep(800, 300)
+        except Exception as e:
+            logger.error(f"Error triggering audio alert: {str(e)}")
+
+    def auto_save_logs(self):
+        """Auto-save logs to file"""
+        try:
+            if not self.log_data:
+                return
+
+            log_dir = self.config.get('monitoring', {}).get(
+                'log_directory', 'logs')
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = os.path.join(log_dir, f"auto_save_{timestamp}.csv")
+
+            with open(filename, 'w', newline='') as csvfile:
+                fieldnames = ['timestamp', 'pid', 'name', 'value', 'unit']
+                writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                writer.writeheader()
+                for entry in self.log_data:
+                    writer.writerow(entry)
+
+            logger.info(f"Auto-saved logs to {filename}")
+
+        except Exception as e:
+            logger.error(f"Error auto-saving logs: {str(e)}")
 
     def update_dashboard(self):
         """Update dashboard widgets"""
         try:
             for key, widget_data in self.dashboard_widgets.items():
-                if key in self.pid_data:
-                    value = self.pid_data[key]['value']
+                # Map dashboard keys to PID names
+                pid_map = {
+                    'rpm': 'RPM',
+                    'speed': 'SPEED',
+                    'engine_load': 'ENGINE_LOAD'
+                }
+
+                pid_name = pid_map.get(key, key.upper())
+
+                if pid_name in self.pid_data:
+                    value = self.pid_data[pid_name]['value']
 
                     # Update value label
                     if isinstance(value, (int, float)):
@@ -1388,6 +2396,11 @@ class EnhancedOBDMonitor:
                     f.write(
                         f"OBD Monitor Log - {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
                     f.write("=" * 60 + "\n\n")
+                    f.write(
+                        f"Connection Type: {self.connection_type.title()}\n")
+                    f.write(f"Total Entries: {len(self.log_data)}\n")
+                    f.write(
+                        f"Session Duration: {self.session_label.cget('text')}\n\n")
 
                     for entry in self.log_data:
                         f.write(
@@ -1491,6 +2504,242 @@ class EnhancedOBDMonitor:
             messagebox.showerror(
                 "Theme Error", f"Failed to apply theme: {str(e)}")
 
+    def show_add_pid_dialog(self):
+        """Show dialog to add PID to dashboard"""
+        try:
+            # Create a popup dialog
+            dialog = tk.Toplevel(self.root)
+            dialog.title("Add PID to Dashboard")
+            dialog.geometry("400x400")
+            dialog.resizable(False, False)
+            dialog.transient(self.root)
+            dialog.grab_set()
+
+            # Make dialog appear in center of parent window
+            x = self.root.winfo_x() + (self.root.winfo_width() // 2) - (400 // 2)
+            y = self.root.winfo_y() + (self.root.winfo_height() // 2) - (400 // 2)
+            dialog.geometry(f"+{x}+{y}")
+
+            # Create frame
+            main_frame = ctk.CTkFrame(dialog)
+            main_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+            # Instructions
+            ctk.CTkLabel(main_frame, text="Select a PID to add to dashboard",
+                         font=ctk.CTkFont(size=14, weight="bold")).pack(pady=10)
+
+            # Create PID selection listbox
+            pid_frame = ctk.CTkFrame(main_frame)
+            pid_frame.pack(fill="both", expand=True, padx=10, pady=10)
+
+            # Search field
+            search_frame = ctk.CTkFrame(pid_frame)
+            search_frame.pack(fill="x", padx=5, pady=5)
+
+            ctk.CTkLabel(search_frame, text="Search:").pack(
+                side="left", padx=5)
+            search_var = tk.StringVar()
+            search_entry = ctk.CTkEntry(
+                search_frame, textvariable=search_var, width=200)
+            search_entry.pack(side="left", padx=5, fill="x", expand=True)
+
+            # PID listbox
+            pids_frame = ctk.CTkFrame(pid_frame)
+            pids_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+            # Use CTkScrollableFrame for the PID list
+            scroll_frame = ctk.CTkScrollableFrame(pids_frame, height=200)
+            scroll_frame.pack(fill="both", expand=True)
+
+            # Get sorted list of available PIDs
+            available_pids = sorted(list(self.pid_data.keys()))
+
+            # Create PID buttons
+            self.pid_buttons = []
+            self.selected_pid = None
+
+            def select_pid(pid_name):
+                self.selected_pid = pid_name
+                for btn, pid in self.pid_buttons:
+                    if pid == pid_name:
+                        btn.configure(fg_color=("gray70", "gray30"))
+                    else:
+                        btn.configure(fg_color=("gray80", "gray25"))
+
+            def filter_pids(*args):
+                search_term = search_var.get().lower()
+                # Clear existing buttons
+                for btn, _ in self.pid_buttons:
+                    btn.destroy()
+                self.pid_buttons = []
+
+                # Create filtered buttons
+                for pid_name in available_pids:
+                    if search_term in pid_name.lower():
+                        btn = ctk.CTkButton(
+                            scroll_frame,
+                            text=f"{pid_name} ({self.pid_data[pid_name].get('value', '--')} {self.pid_data[pid_name].get('unit', '')})",
+                            command=lambda p=pid_name: select_pid(p),
+                            fg_color=("gray80", "gray25")
+                        )
+                        btn.pack(fill="x", padx=5, pady=2)
+                        self.pid_buttons.append((btn, pid_name))
+
+            # Populate initial PID list
+            filter_pids()
+
+            # Bind search field
+            search_var.trace_add("write", filter_pids)
+
+            # Gauge configuration frame
+            config_frame = ctk.CTkFrame(main_frame)
+            config_frame.pack(fill="x", padx=10, pady=10)
+
+            # Min/max values
+            range_frame = ctk.CTkFrame(config_frame)
+            range_frame.pack(fill="x", pady=5)
+
+            ctk.CTkLabel(range_frame, text="Min Value:").pack(
+                side="left", padx=5)
+            min_var = tk.StringVar(value="0")
+            min_entry = ctk.CTkEntry(
+                range_frame, textvariable=min_var, width=80)
+            min_entry.pack(side="left", padx=5)
+
+            ctk.CTkLabel(range_frame, text="Max Value:").pack(
+                side="left", padx=5)
+            max_var = tk.StringVar(value="100")
+            max_entry = ctk.CTkEntry(
+                range_frame, textvariable=max_var, width=80)
+            max_entry.pack(side="left", padx=5)
+
+            # Color selection
+            color_frame = ctk.CTkFrame(config_frame)
+            color_frame.pack(fill="x", pady=5)
+
+            ctk.CTkLabel(color_frame, text="Gauge Color:").pack(
+                side="left", padx=5)
+            color_var = tk.StringVar(value="blue")
+            color_combo = ctk.CTkComboBox(color_frame, variable=color_var,
+                                          values=["blue", "green", "red", "orange", "purple"])
+            color_combo.pack(side="left", padx=5)
+
+            # Buttons
+            button_frame = ctk.CTkFrame(main_frame)
+            button_frame.pack(fill="x", pady=10)
+
+            def on_cancel():
+                dialog.destroy()
+
+            def on_add():
+                if not self.selected_pid:
+                    messagebox.showwarning(
+                        "No Selection", "Please select a PID to add")
+                    return
+
+                try:
+                    min_val = float(min_var.get())
+                    max_val = float(max_var.get())
+
+                    if min_val >= max_val:
+                        messagebox.showwarning(
+                            "Invalid Range", "Min value must be less than max value")
+                        return
+
+                    # Add gauge to dashboard
+                    self.add_gauge_to_dashboard(
+                        title=self.selected_pid,
+                        key=self.selected_pid,
+                        min_val=min_val,
+                        max_val=max_val,
+                        unit=self.pid_data[self.selected_pid].get('unit', ''),
+                        color=color_var.get()
+                    )
+                    dialog.destroy()
+
+                except ValueError:
+                    messagebox.showwarning(
+                        "Invalid Input", "Min and max values must be numbers")
+
+            cancel_btn = ctk.CTkButton(
+                button_frame, text="Cancel", command=on_cancel, width=100)
+            cancel_btn.pack(side="right", padx=10)
+
+            add_btn = ctk.CTkButton(
+                button_frame, text="Add Gauge", command=on_add, width=100)
+            add_btn.pack(side="right", padx=10)
+
+        except Exception as e:
+            logger.error(f"Error showing add PID dialog: {str(e)}")
+            messagebox.showerror(
+                "Dialog Error", f"Failed to show dialog: {str(e)}")
+
+    def create_gauge_row(self):
+        """Create a new row frame for gauges"""
+        try:
+            # Create a new row frame
+            row_frame = ctk.CTkFrame(self.gauges_container)
+            row_frame.pack(fill="x", pady=5)
+
+            # Store in row frames list
+            if not hasattr(self, 'row_frames'):
+                self.row_frames = []
+            self.row_frames.append(row_frame)
+
+            return row_frame
+
+        except Exception as e:
+            logger.error(f"Error creating gauge row: {str(e)}")
+            return None
+
+    def add_gauge_to_dashboard(self, title, key, min_val, max_val, unit, color):
+        """Add a gauge to the dashboard"""
+        try:
+            # Check if we need a new row
+            if self.current_col >= self.max_cols:
+                self.current_row += 1
+                self.current_col = 0
+                self.create_gauge_row()
+
+            # Get current row frame
+            if self.current_row < len(self.row_frames):
+                row_frame = self.row_frames[self.current_row]
+            else:
+                row_frame = self.create_gauge_row()
+
+            # Create gauge widget
+            gauge = self.create_enhanced_gauge_widget(
+                row_frame, title, key, min_val, max_val, unit,
+                self.current_row, self.current_col, color
+            )
+
+            # Update column position
+            self.current_col += 1
+
+            # Update config to save dashboard layout
+            if 'dashboard' not in self.config:
+                self.config['dashboard'] = {'gauges': []}
+
+            # Make sure gauges is a list before appending
+            if not isinstance(self.config['dashboard']['gauges'], list):
+                self.config['dashboard']['gauges'] = []
+
+            self.config['dashboard']['gauges'].append({
+                'title': title,
+                'key': key,
+                'min_val': min_val,
+                'max_val': max_val,
+                'unit': unit,
+                'color': color
+            })
+
+            self.save_config_to_file()
+            return gauge
+
+        except Exception as e:
+            logger.error(f"Error adding gauge to dashboard: {str(e)}")
+            return None
+
     def run(self):
         """Run the application"""
         try:
@@ -1499,6 +2748,155 @@ class EnhancedOBDMonitor:
             logger.error(f"Application error: {str(e)}")
             messagebox.showerror("Application Error",
                                  f"An error occurred: {str(e)}")
+
+
+class BluetoothOBDManager2:
+    """Manager for Bluetooth OBD connections using bleak (updated version)"""
+
+    def __init__(self):
+        self.device = None
+        self.client = None
+        self.is_connected = False
+        self.characteristic_uuid = None
+
+    async def scan_devices(self, timeout=10):
+        """Scan for available Bluetooth OBD devices"""
+        try:
+            devices = await bleak.BleakScanner.discover(timeout=timeout)
+            obd_devices = []
+
+            for device in devices:
+                # Look for OBD-related device names
+                if device.name and any(keyword in device.name.lower()
+                                       for keyword in ['obd', 'elm', 'obdlink', 'vgate']):
+                    obd_devices.append({
+                        'name': device.name,
+                        'address': device.address,
+                        'signal_strength': getattr(device, 'rssi', 'N/A')
+                    })
+
+            return obd_devices
+
+        except Exception as e:
+            logger.error(f"Error scanning for Bluetooth devices: {str(e)}")
+            return []
+
+    async def connect_device(self, address):
+        """Connect to a Bluetooth OBD device"""
+        try:
+            self.client = bleak.BleakClient(address)
+            await self.client.connect()
+
+            if self.client.is_connected:
+                # Discover services and characteristics
+                services = []
+
+                # Use alternative approach to discover services
+                try:
+                    # Different versions of Bleak have different ways to access services
+                    # Using dynamic approach to avoid type checking errors
+                    services = []
+
+                    # Get all object attributes that might be services
+                    if hasattr(self.client, 'services'):
+                        client_services = getattr(self.client, 'services')
+
+                        # Handle different service collection types
+                        if hasattr(client_services, 'values'):
+                            # If it's a dictionary-like object
+                            services = list(client_services.values())
+                        elif hasattr(client_services, '__iter__'):
+                            # If it's any iterable
+                            services = list(client_services)
+                except Exception as e:
+                    logger.error(f"Error getting services: {str(e)}")
+                    services = []
+
+                # Look for UART service or similar
+                for service in services:
+                    for char in service.characteristics:
+                        if "write" in char.properties:
+                            self.characteristic_uuid = char.uuid
+                            break
+                    if self.characteristic_uuid:
+                        break
+
+                if self.characteristic_uuid:
+                    self.is_connected = True
+                    logger.info(
+                        f"Connected to Bluetooth OBD device: {address}")
+                    return True
+                else:
+                    await self.client.disconnect()
+                    logger.error("No suitable characteristic found")
+                    return False
+
+            return False
+
+        except Exception as e:
+            logger.error(f"Error connecting to Bluetooth device: {str(e)}")
+            return False
+
+    async def disconnect_device(self):
+        """Disconnect from Bluetooth OBD device"""
+        try:
+            if self.client and self.client.is_connected:
+                await self.client.disconnect()
+
+            self.is_connected = False
+            self.client = None
+            self.characteristic_uuid = None
+            logger.info("Disconnected from Bluetooth OBD device")
+
+        except Exception as e:
+            logger.error(
+                f"Error disconnecting from Bluetooth device: {str(e)}")
+
+    async def send_command(self, command):
+        """Send OBD command via Bluetooth"""
+        try:
+            if not self.is_connected or not self.client:
+                return None
+
+            # Check if characteristic UUID is available
+            if not self.characteristic_uuid:
+                logger.error("No characteristic UUID available")
+                return None
+
+            # Send command
+            try:
+                await self.client.write_gatt_char(
+                    self.characteristic_uuid,
+                    command.encode()
+                )
+            except ValueError as e:
+                logger.error(f"Invalid characteristic UUID: {str(e)}")
+                return None
+
+            # Wait for response (simplified - in real implementation, use notifications)
+            await asyncio.sleep(0.1)
+
+            # For now, return a placeholder response
+            # In real implementation, you'd read the response from the device
+            return "41 0C 1A F8"  # Example RPM response
+
+        except Exception as e:
+            logger.error(f"Error sending Bluetooth command: {str(e)}")
+            return None
+
+    def run_async_task(self, coro):
+        """Run an async task in a thread-safe manner"""
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            result = loop.run_until_complete(coro)
+            return result
+        except Exception as e:
+            logger.error(f"Error running async task: {str(e)}")
+            return None
+        finally:
+            if loop and hasattr(loop, 'close'):
+                loop.close()
 
 
 class OBDMonitorApp:

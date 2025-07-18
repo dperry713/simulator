@@ -7,7 +7,13 @@
     "default_baudrate": 38400,
     "timeout": 30,
     "auto_connect": false,
-    "preferred_port": ""
+    "preferred_port": "",
+    "type": "serial"
+  },
+  "bluetooth": {
+    "scan_timeout": 10,
+    "connect_timeout": 10,
+    "last_device": null
   },
   "monitoring": {
     "update_interval": 0.5,
@@ -26,49 +32,319 @@
     "state": "normal"
   },
   "dashboard": {
-    "gauges": {
-      "rpm": {
-        "min": 0,
-        "max": 8000,
+    "gauges": [
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
         "unit": "RPM",
-        "warning_threshold": 6000,
-        "critical_threshold": 7000
+        "color": "#FF6B6B"
       },
-      "speed": {
-        "min": 0,
-        "max": 200,
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
         "unit": "km/h",
-        "warning_threshold": 120,
-        "critical_threshold": 160
+        "color": "#4ECDC4"
       },
-      "engine_load": {
-        "min": 0,
-        "max": 100,
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
         "unit": "%",
-        "warning_threshold": 80,
-        "critical_threshold": 95
+        "color": "#45B7D1"
       },
-      "coolant_temp": {
-        "min": -40,
-        "max": 120,
-        "unit": "\u00c2\u00b0C",
-        "warning_threshold": 90,
-        "critical_threshold": 105
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
       },
-      "intake_temp": {
-        "min": -40,
-        "max": 120,
-        "unit": "\u00c2\u00b0C",
-        "warning_threshold": 60,
-        "critical_threshold": 80
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
       },
-      "throttle_pos": {
-        "min": 0,
-        "max": 100,
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
         "unit": "%",
-        "warning_threshold": 90,
-        "critical_threshold": 100
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
+      },
+      {
+        "title": "RPM",
+        "key": "rpm",
+        "min_val": 0,
+        "max_val": 8000,
+        "unit": "RPM",
+        "color": "#FF6B6B"
+      },
+      {
+        "title": "Speed",
+        "key": "speed",
+        "min_val": 0,
+        "max_val": 200,
+        "unit": "km/h",
+        "color": "#4ECDC4"
+      },
+      {
+        "title": "Engine Load",
+        "key": "engine_load",
+        "min_val": 0,
+        "max_val": 100,
+        "unit": "%",
+        "color": "#45B7D1"
       }
-    }
+    ]
   }
 }

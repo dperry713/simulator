@@ -4,12 +4,14 @@ A comprehensive OBD-II (On-Board Diagnostics) monitoring application built with 
 
 ## Features
 
-### 🚗 Real-time Vehicle Monitoring
+### 🚗 Enhanced Real-time Vehicle Monitoring
 
 - **Live Dashboard**: Digital gauges for key metrics (RPM, Speed, Engine Load, etc.)
+- **Enhanced Interface**: Modern UI with 1600x1000 window size for better visibility
+- **Session Timer**: Track monitoring session duration
 - **PID Monitoring**: Real-time Parameter ID data collection and display
-- **Auto-refresh**: Configurable update intervals for continuous monitoring
-- **Connection Status**: Visual indicators for OBD connection status
+- **Auto-refresh**: Configurable update intervals (default: 500ms)
+- **Connection Status**: Real-time visual indicators for OBD connection status
 
 ### 📊 Data Visualization
 
@@ -32,8 +34,16 @@ A comprehensive OBD-II (On-Board Diagnostics) monitoring application built with 
 - **Enhanced Logs**: Detailed logging with timestamps and search functionality
 - **Auto-save**: Configurable automatic data saving
 
-### ⚙️ Advanced Configuration
+### ⚙️ Advanced Configuration & Interface
 
+- **Tabbed Interface**: Seven specialized tabs for different functions
+  - **Dashboard**: Real-time gauge display with color-coded alerts
+  - **PIDs**: Detailed parameter monitoring with filtering and search
+  - **Charts**: Live plotting and historical data visualization
+  - **DTCs**: Diagnostic trouble code management
+  - **Alerts**: Configurable threshold-based warning system
+  - **Logs**: Enhanced logging with search and export capabilities
+  - **Settings**: Comprehensive application configuration
 - **Connection Settings**: COM port selection and baudrate configuration
 - **Alert Thresholds**: Customizable warning and critical value alerts
 - **Theme Support**: Dark/light theme switching
@@ -46,17 +56,19 @@ A comprehensive OBD-II (On-Board Diagnostics) monitoring application built with 
 - Windows 10/11 (primary support)
 - Python 3.8 or higher
 - OBD-II compatible vehicle (1996+ for most vehicles)
-- ELM327 OBD-II adapter (USB or Bluetooth)
+- ELM327 OBD-II adapter (USB, Bluetooth Classic, or BLE)
 
 ### Python Dependencies
 
-```
+```python
 tkinter (usually included with Python)
-customtkinter>=5.0.0
-python-obd>=0.7.0
-pyserial>=3.4
+customtkinter>=5.2.0
+obd>=0.7.1
+pyserial>=3.5
 matplotlib>=3.5.0
 numpy>=1.21.0
+bleak>=0.19.0  # For Bluetooth BLE connectivity
+asyncio        # For asynchronous Bluetooth operations
 ```
 
 ## Installation
@@ -77,15 +89,45 @@ pip install -r requirements.txt
 Or install manually:
 
 ```bash
-pip install customtkinter python-obd pyserial matplotlib numpy
+pip install customtkinter obd pyserial matplotlib numpy bleak
 ```
 
 ### 3. Hardware Setup
 
-1. Connect your ELM327 OBD-II adapter to your vehicle's OBD port
-2. If using USB adapter, connect to your computer
-3. If using Bluetooth, pair the adapter with your computer
-4. Note the COM port assigned to your adapter
+1. Connect your OBD-II adapter to your vehicle's OBD port
+2. Choose your connection method:
+   - **USB/Serial**: Connect to your computer and note the COM port
+   - **Bluetooth Classic**: Pair the adapter with your computer and note the COM port
+   - **Bluetooth Low Energy (BLE)**: Ensure BLE is enabled on your computer
+3. For J1850 VPW protocol, ensure your adapter supports this standard
+
+## Quick Start
+
+### Prerequisites
+
+1. **OBD-II Adapter**: ELM327 or compatible adapter
+2. **Python 3.8+**: Installed and configured
+3. **Vehicle**: 1996+ with OBD-II port
+
+### Installation & Setup
+
+```bash
+# 1. Install dependencies
+pip install -r requirements.txt
+
+# 2. Connect OBD adapter to vehicle and computer
+# 3. Note the COM port (typically COM3)
+
+# 4. Run the application
+python obd1.py
+```
+
+### First Connection
+
+1. **Select Port**: Choose your adapter's COM port (defaults to COM3)
+2. **Connect**: Click "Connect" button
+3. **Start Monitoring**: Click "Start" to begin data collection
+4. **Explore**: Check different tabs for various features
 
 ## Usage
 
@@ -99,8 +141,14 @@ python obd1.py
 
 1. **Connect to Vehicle**:
 
-   - Select your OBD adapter's COM port (defaults to COM3)
-   - Choose appropriate baudrate (38400 recommended)
+   - **For Serial Connection**:
+     - Select your OBD adapter's COM port (defaults to COM3)
+     - Choose appropriate baudrate (38400 recommended)
+   - **For Bluetooth BLE Connection**:
+     - Select "Bluetooth (BLE)" as connection type
+     - Select your protocol (J1850 VPW)
+     - Click scan/refresh to discover devices
+     - Select your BLE device from the list
    - Click "Connect"
 
 2. **Start Monitoring**:
@@ -116,16 +164,62 @@ python obd1.py
    - Click "Start Chart" for real-time visualization
 
 4. **Check Diagnostics**:
+
    - Visit DTCs tab to view trouble codes
    - Use "Refresh DTCs" to get latest codes
    - Clear codes with "Clear DTCs" (if supported)
+
+5. **Configure Alerts**:
+
+   - Go to Alerts tab to set custom thresholds
+   - Enable/disable audio and visual alerts
+   - Set warning and critical values for each parameter
+
+6. **View Historical Data**:
+
+   - Check Logs tab for session history
+   - Use search functionality to find specific entries
+   - Export data in CSV or text format
+
+### Key Features Overview
+
+#### Dashboard Tab
+
+- **Real-time Gauges**: RPM, Speed, Engine Load with color-coded displays
+- **Active Alerts Panel**: Shows current warnings and critical alerts
+- **Session Timer**: Track monitoring session duration
+- **Progress Bars**: Visual representation of parameter values
+
+#### PIDs Tab
+
+- **Comprehensive PID Display**: All available parameters in table format
+- **Real-time Filtering**: Search and filter PIDs by name or value
+- **Min/Max Tracking**: Automatic tracking of parameter ranges
+- **Export Functionality**: Save PID data to CSV format
+
+#### Charts Tab
+
+- **Live Plotting**: Real-time matplotlib charts for any PID
+- **Historical View**: Track parameter changes over time
+- **Configurable Display**: Choose which parameters to chart
+- **Data Export**: Save chart data for analysis
+
+#### Enhanced Interface
+
+- **Modern UI**: CustomTkinter-based interface with dark/light themes
+- **Large Window**: 1600x1000 default size for better visibility
+- **Responsive Design**: Adapts to different screen sizes
+- **Tabbed Navigation**: Easy access to all features
 
 ### Configuration Options
 
 #### Connection Settings
 
-- **Port**: COM port for OBD adapter (default: COM3)
-- **Baudrate**: Communication speed (9600/38400/115200)
+- **Connection Type**: Choose between Serial or Bluetooth BLE
+- **Protocol**: Select communication protocol (J1850 VPW supported)
+- **Port**: COM port for Serial adapter (default: COM3)
+- **Bluetooth Device**: Select from discovered BLE devices
+- **Baudrate**: Communication speed (Serial: 9600/38400/115200, J1850 VPW: 10416)
 - **Timeout**: Connection timeout in seconds
 - **Auto-connect**: Automatically connect on startup
 
@@ -143,16 +237,21 @@ python obd1.py
 
 ## File Structure
 
-```
+```text
 obd/
-├── obd1.py              # Main application file
-├── config.json          # Configuration settings (auto-generated)
-├── requirements.txt     # Python dependencies
-├── install_requirements.py # Dependency installer
-├── logs/               # Log files directory
-│   ├── session_*.csv   # Session data exports
-│   └── debug_*.log     # Debug logs
-└── README.md           # This file
+├── obd1.py                  # Main application file (Enhanced OBD Monitor)
+├── config.json              # Configuration settings (auto-generated)
+├── requirements.txt         # Python dependencies
+├── install_requirements.py  # Dependency installer helper
+├── logs/                    # Log files directory
+│   ├── session_*.csv        # Session data exports
+│   └── debug_*.log          # Debug logs
+├── protocols/               # OBD communication protocols
+│   └── j1850_vpw.py         # J1850 VPW protocol implementation
+├── bluetooth/               # Bluetooth connectivity modules
+│   └── bluetooth_interface.py # BLE interface implementation
+├── __pycache__/             # Python cache files
+└── README.md                # This documentation file
 ```
 
 ## Configuration File
@@ -190,6 +289,9 @@ The application automatically creates a `config.json` file with your settings:
 - **"No response from OBD device"**: Check adapter connection and COM port
 - **"Permission denied"**: Ensure no other applications are using the COM port
 - **"Timeout"**: Try different baudrate or increase timeout value
+- **"BLE device not found"**: Ensure Bluetooth is enabled and the device is in range
+- **"BLE connection failed"**: Check if the device is already connected to another application
+- **"Protocol error"**: Verify your vehicle supports the selected protocol
 
 ### Data Issues
 
@@ -214,9 +316,11 @@ This application works with most vehicles that support OBD-II standard:
 ### Tested Adapters
 
 - ELM327 USB adapters
-- ELM327 Bluetooth adapters
+- ELM327 Bluetooth Classic adapters
+- ELM327 Bluetooth Low Energy (BLE) adapters
 - OBDLink adapters
 - Generic OBD-II adapters
+- J1850 VPW compatible adapters
 
 ## Data Export Formats
 
@@ -239,14 +343,20 @@ This application works with most vehicles that support OBD-II standard:
 
 ### Code Structure
 
-- **EnhancedOBDMonitor**: Main application class
+- **EnhancedOBDMonitor**: Main application class with extended functionality
+- **OBD1App**: Alternative simplified interface with BLE support
+- **Protocols**: Modular protocol implementations (J1850_VPW)
+- **Connectivity**: Connection handlers (Serial, Bluetooth)
 - **UI Components**: Tabbed interface with specialized panels
 - **Data Handlers**: PID processing and storage
 - **Export Functions**: Data formatting and file operations
 
 ### Key Methods
 
-- `connect_obd()`: Establishes OBD connection
+- `connect_obd()`: Establishes OBD serial connection
+- `connect_ble()`: Establishes Bluetooth BLE connection
+- `send_obd_request()`: Sends commands using the selected protocol
+- `receive_obd_response()`: Receives data from the vehicle
 - `monitor_loop()`: Main data collection loop
 - `update_dashboard()`: Updates real-time displays
 - `export_data()`: Handles data export operations
@@ -272,6 +382,28 @@ For issues and support:
 3. Create an issue with detailed information about your problem
 
 ## Changelog
+
+### Version 3.0.0 (Current)
+
+- **Bluetooth BLE Support**: Connect to BLE-enabled OBD adapters
+- **Multiple Connection Methods**: Serial and Bluetooth Low Energy (BLE) connectivity
+- **J1850 VPW Protocol**: Support for SAE J1850 Variable Pulse Width protocol
+- **Protocol Selection**: Choose the appropriate protocol for your vehicle
+- **Modular Architecture**: Separated protocol and connectivity components
+
+### Version 2.0.0
+
+- **Enhanced Interface**: Complete UI redesign with modern tabbed interface
+- **Improved Window Size**: Increased to 1600x1000 with minimum 1400x900
+- **Session Management**: Added session timer and enhanced status tracking
+- **Advanced PID Monitoring**: Enhanced PIDs tab with filtering and search
+- **Real-time Charts**: Live matplotlib integration for data visualization
+- **Alert System**: Comprehensive threshold-based alert configuration
+- **Enhanced Logging**: Advanced log management with search and export
+- **Settings Panel**: Comprehensive configuration interface
+- **COM3 Default**: Automatic preference for COM3 connection
+- **Error Handling**: Improved OBD command error handling and recovery
+- **Data Export**: Multiple export formats (CSV, TXT) for different data types
 
 ### Version 1.0.0
 
